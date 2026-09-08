@@ -4,3 +4,5 @@ qa-cli drives Telegram Web (https://web.telegram.org/a/) in headless Chromium vi
 qa telegram login     # saves ~/.config/qa-cli/telegram-qr.png ; scan with phone
 qa telegram status
 ```
+
+Install: `pipx install git+https://github.com/alex-mextner/qa-cli` (or `./install.sh`; pipx-first, symlink fallback).

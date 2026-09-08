@@ -5,8 +5,11 @@ or an injected BrowserDriver (hermetic tests).
 
 Assumptions: default binary is `agent-browser` on PATH (override QA_BROWSER_BIN);
 headless Chromium is agent-browser's default (no --headed); session name
-qa-telegram with --restore so re-runs skip QR. Never invokes macOS
-`open -a Telegram`, Playwright, Puppeteer, or npx.
+qa-telegram with --restore so re-runs skip QR. QR-ready means a painted
+QR-related canvas (non-uniform opaque pixels) or a QR-labeled img — a blank
+or unrelated canvas is not ready. wait_for_qr also returns if a restored
+session becomes logged-in, so re-runs do not wait for a QR that never appears.
+Never invokes macOS `open -a Telegram`, Playwright, Puppeteer, or npx.
 """
 from __future__ import annotations
 
@@ -31,6 +34,58 @@ _LOGGED_IN_JS = (
     "})()"
 )
 
+# Side-effect free: painted QR canvas (or QR <img>), never click/send.
+# Telegram sizes the canvas before drawing; dimensions alone are not ready.
+_QR_VISIBLE_JS = (
+    "(() => {"
+    "  const qrHay = (el) => {"
+    "    const cls = typeof el.className === 'string' ? el.className"
+    "      : ((el.className && el.className.baseVal) || '');"
+    "    const aria = el.getAttribute ? (el.getAttribute('aria-label') || '') : '';"
+    "    return (cls + ' ' + (el.id || '') + ' ' + (el.alt || '') + ' '"
+    "      + (el.src || '') + ' ' + aria).toLowerCase();"
+    "  };"
+    "  const isQrRelated = (el) => {"
+    "    let n = el;"
+    "    for (let i = 0; i < 8 && n; i++) {"
+    "      if (/qr/.test(qrHay(n))) return true;"
+    "      n = n.parentElement;"
+    "    }"
+    "    return false;"
+    "  };"
+    "  const isPainted = (c) => {"
+    "    try {"
+    "      const ctx = c.getContext && c.getContext('2d');"
+    "      if (!ctx || !ctx.getImageData) return false;"
+    "      const w = c.width || 0, h = c.height || 0;"
+    "      if (w < 1 || h < 1) return false;"
+    "      const d = ctx.getImageData(0, 0, w, h).data;"
+    "      let first = -1;"
+    "      for (let i = 0; i < d.length; i += 4) {"
+    "        if (d[i + 3] < 16) continue;"
+    "        const key = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];"
+    "        if (first < 0) first = key;"
+    "        else if (key !== first) return true;"
+    "      }"
+    "      return false;"
+    "    } catch (e) { return false; }"
+    "  };"
+    "  const canvases = Array.from(document.querySelectorAll('canvas'));"
+    "  for (const c of canvases) {"
+    "    const w = Math.max(c.width || 0, c.clientWidth || 0);"
+    "    const h = Math.max(c.height || 0, c.clientHeight || 0);"
+    "    if (w >= 80 && h >= 80 && isQrRelated(c) && isPainted(c)) return 'qr-visible';"
+    "  }"
+    "  const imgs = Array.from(document.querySelectorAll('img'));"
+    "  for (const img of imgs) {"
+    "    const w = Math.max(img.naturalWidth || 0, img.clientWidth || 0);"
+    "    const h = Math.max(img.naturalHeight || 0, img.clientHeight || 0);"
+    "    if (isQrRelated(img) && w >= 80 && h >= 80) return 'qr-visible';"
+    "  }"
+    "  return 'qr-missing';"
+    "})()"
+)
+
 
 class BrowserError(RuntimeError):
     """agent-browser ran but failed (nonzero exit)."""
@@ -48,6 +103,7 @@ class BrowserDriver(Protocol):
     def open(self, url: str) -> None: ...
     def screenshot(self, path: str) -> None: ...
     def is_logged_in(self) -> bool: ...
+    def wait_for_qr(self, timeout: float) -> None: ...
     def wait_until_logged_in(self, timeout: float) -> None: ...
 
 
@@ -97,6 +153,19 @@ class AgentBrowserDriver:
         proc = self._run("eval", _LOGGED_IN_JS)
         out = (proc.stdout or "").strip().strip('"').strip("'")
         return out.endswith("logged-in") or out == "logged-in"
+
+    def is_qr_visible(self) -> bool:
+        proc = self._run("eval", _QR_VISIBLE_JS)
+        out = (proc.stdout or "").strip().strip('"').strip("'")
+        return out.endswith("qr-visible") or out == "qr-visible"
+
+    def wait_for_qr(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.is_logged_in() or self.is_qr_visible():
+                return
+            time.sleep(0.5)
+        raise TimeoutError("timed out waiting for Telegram Web QR canvas")
 
     def wait_until_logged_in(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout

@@ -14,6 +14,7 @@ from pathlib import Path
 from qa_cli.browser import SESSION_NAME, TELEGRAM_WEB_URL, BrowserDriver
 
 DEFAULT_LOGIN_TIMEOUT = 300.0
+DEFAULT_QR_WAIT_TIMEOUT = 60.0
 
 
 def config_dir() -> Path:
@@ -27,18 +28,24 @@ def qr_path() -> Path:
     return config_dir() / "telegram-qr.png"
 
 
-def login(browser: BrowserDriver, timeout: float = DEFAULT_LOGIN_TIMEOUT) -> int:
+def login(
+    browser: BrowserDriver,
+    timeout: float = DEFAULT_LOGIN_TIMEOUT,
+    qr_timeout: float = DEFAULT_QR_WAIT_TIMEOUT,
+) -> int:
     config_dir().mkdir(parents=True, exist_ok=True)
     browser.open(TELEGRAM_WEB_URL)
-    if browser.is_logged_in():
-        print("logged-in")
-        print(f"session: {SESSION_NAME}")
-        print(f"config: {config_dir()}")
-        return 0
-    dest = qr_path()
-    browser.screenshot(str(dest))
-    print(str(dest))
-    browser.wait_until_logged_in(timeout)
+    if not browser.is_logged_in():
+        dest = qr_path()
+        browser.wait_for_qr(qr_timeout)
+        if not browser.is_logged_in():
+            browser.screenshot(str(dest))
+            print(str(dest))
+            browser.wait_until_logged_in(timeout)
+            return 0
+    print("logged-in")
+    print(f"session: {SESSION_NAME}")
+    print(f"config: {config_dir()}")
     return 0
 
 

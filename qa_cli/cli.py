@@ -55,10 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Open Telegram Web, save QR if needed, wait until logged in",
         description=(
             "Open https://web.telegram.org/a/ via agent-browser (session "
-            "qa-telegram). If not logged in, save a QR screenshot to "
-            "~/.config/qa-cli/telegram-qr.png and print that path. Scan with "
-            "the Telegram phone app. If already logged in, print status and "
-            "skip QR."
+            "qa-telegram). If not logged in, wait until the QR canvas is "
+            "visible, save a screenshot to ~/.config/qa-cli/telegram-qr.png "
+            "and print that path. Scan with the Telegram phone app. If "
+            "already logged in, print status and skip QR."
         ),
     )
     tg_sub.add_parser(

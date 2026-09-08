@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+# Thin shim for a symlink install path (the symlink must resolve back to the
+# repo to find the qa_cli package). pipx/package installs use [project.scripts]
+# qa = "qa_cli.cli:main" and never run this file. Keep it MINIMAL.
+import os
+import sys
+
+_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if os.path.isfile(os.path.join(_root, "qa_cli", "__init__.py")):
+    sys.path.insert(0, _root)
+
+from qa_cli.cli import main  # noqa: E402
+
+raise SystemExit(main())

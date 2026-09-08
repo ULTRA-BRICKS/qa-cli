@@ -1,0 +1,58 @@
+# Test gate — run the repo's pytest suite on every PR.
+#
+# The green/red merge signal: `uv run --no-project --with pytest pytest tests/`.
+# Dependency-free (uv only, no secrets, no committed lockfile required).
+# Default tests are hermetic: FakeBrowserDriver, never live Telegram.
+#
+# Runs the PR's own code, so it uses `pull_request` (NOT pull_request_target).
+# Pin actions to commit SHAs.
+
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pytest:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    env:
+      TEST_PATHS: tests
+      TEST_EXTRA_DEPS: ""
+      PYTEST_SPEC: "pytest>=8,<9"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run pytest
+        run: |
+          set -euo pipefail
+          if [ ! -d tests ] && [ "${TEST_PATHS}" = "tests" ]; then
+            echo "::error::no tests/ directory found — set TEST_PATHS or add tests."
+            exit 1
+          fi
+          extra=""
+          for dep in ${TEST_EXTRA_DEPS}; do extra="${extra} --with ${dep}"; done
+          # --no-project: run against the source checkout WITHOUT building/installing
+          # qa-cli as a dist, so hermetic tests exercise the checkout import path.
+          # shellcheck disable=SC2086
+          uv run --no-project --python "${{ matrix.python-version }}" \
+            --with "${PYTEST_SPEC}" ${extra} pytest ${TEST_PATHS} -q

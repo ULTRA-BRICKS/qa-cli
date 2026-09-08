@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qa-cli"
+# Single source of truth: the version lives in qa_cli.__version__ and is resolved
+# here at build time (see [tool.setuptools.dynamic] below).
+dynamic = ["version"]
+description = "Headless Telegram Web testing via agent-browser."
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+qa = "qa_cli.cli:main"
+
+# Explicit package list (NOT setuptools flat-layout autodiscovery).
+[tool.setuptools.packages.find]
+include = ["qa_cli*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "qa_cli.__version__" }

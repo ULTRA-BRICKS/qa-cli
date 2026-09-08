@@ -1,0 +1,16 @@
+# rig.yaml — REPO-LEVEL config only.
+# Worktree-only: primary checkout stays on main; all authoring happens in
+# .worktrees/<name>. CI installs the tests gate from ci.items.tests.
+version: 1
+
+agent_hooks:
+  worktree_only: true
+
+ci:
+  enabled: true
+  target: .github/workflows
+  all: false
+  items:
+    tests:
+      enabled: true
+      tier: block

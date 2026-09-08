@@ -6,8 +6,9 @@ or an injected BrowserDriver (hermetic tests).
 Assumptions: default binary is `agent-browser` on PATH (override QA_BROWSER_BIN);
 headless Chromium is agent-browser's default (no --headed); session name
 qa-telegram with --restore so re-runs skip QR. QR-ready means a painted
-QR-related canvas (non-uniform opaque pixels) or a QR-labeled img — a blank
-or unrelated canvas is not ready. wait_for_qr also returns if a restored
+QR-related canvas (non-uniform opaque pixels), a QR-labeled img, or a
+QR-related svg (>= 80px) — a blank or unrelated canvas is not ready.
+wait_for_qr also returns if a restored
 session becomes logged-in, so re-runs do not wait for a QR that never appears.
 Never invokes macOS `open -a Telegram`, Playwright, Puppeteer, or npx.
 """
@@ -22,8 +23,9 @@ TELEGRAM_WEB_URL = "https://web.telegram.org/a/"
 SESSION_NAME = "qa-telegram"
 INSTALL_HINT = "npm i -g agent-browser && agent-browser install"
 
-# Telegram Web A (web.telegram.org/a/) shows a QR canvas before login and
-# #LeftColumn afterwards. Keep the probe side-effect free: no clicks, no sends.
+# Telegram Web A (web.telegram.org/a/) shows a QR (SVG in .qr-container,
+# sometimes canvas/img) before login and #LeftColumn afterwards.
+# Keep the probe side-effect free: no clicks, no sends.
 _LOGGED_IN_JS = (
     "(() => {"
     "  const text = document.body ? (document.body.innerText || '') : '';"
@@ -34,8 +36,9 @@ _LOGGED_IN_JS = (
     "})()"
 )
 
-# Side-effect free: painted QR canvas (or QR <img>), never click/send.
-# Telegram sizes the canvas before drawing; dimensions alone are not ready.
+# Side-effect free: painted QR canvas, QR <img>, or QR-related <svg>.
+# Telegram sizes a canvas before drawing; dimensions alone are not ready.
+# Live Web A currently paints the login QR as SVG inside .qr-container.
 _QR_VISIBLE_JS = (
     "(() => {"
     "  const qrHay = (el) => {"
@@ -81,6 +84,14 @@ _QR_VISIBLE_JS = (
     "    const w = Math.max(img.naturalWidth || 0, img.clientWidth || 0);"
     "    const h = Math.max(img.naturalHeight || 0, img.clientHeight || 0);"
     "    if (isQrRelated(img) && w >= 80 && h >= 80) return 'qr-visible';"
+    "  }"
+    "  const svgs = Array.from(document.querySelectorAll('svg'));"
+    "  for (const s of svgs) {"
+    "    const baseW = (s.width && s.width.baseVal && s.width.baseVal.value) || 0;"
+    "    const baseH = (s.height && s.height.baseVal && s.height.baseVal.value) || 0;"
+    "    const w = Math.max(typeof s.width === 'number' ? s.width : 0, baseW, s.clientWidth || 0);"
+    "    const h = Math.max(typeof s.height === 'number' ? s.height : 0, baseH, s.clientHeight || 0);"
+    "    if (isQrRelated(s) && w >= 80 && h >= 80) return 'qr-visible';"
     "  }"
     "  return 'qr-missing';"
     "})()"

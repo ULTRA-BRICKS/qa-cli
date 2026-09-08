@@ -86,10 +86,12 @@ function withParent(spec) {
 }
 const canvases = (payload.canvases || []).map(withParent);
 const imgs = (payload.imgs || []).map(withParent);
+const svgs = (payload.svgs || []).map(withParent);
 global.document = {
   querySelectorAll(sel) {
     if (sel === 'canvas') return canvases;
     if (sel === 'img') return imgs;
+    if (sel === 'svg') return svgs;
     return [];
   }
 };
@@ -97,9 +99,16 @@ const result = eval(payload.js);
 process.stdout.write(String(result));
 """
 
-def _eval_qr_js(js: str, *, canvases=None, imgs=None) -> str:
+def _eval_qr_js(js: str, *, canvases=None, imgs=None, svgs=None) -> str:
     """Run production probe JS against a stub document (no Chromium)."""
-    payload = json.dumps({"js": js, "canvases": canvases or [], "imgs": imgs or []})
+    payload = json.dumps(
+        {
+            "js": js,
+            "canvases": canvases or [],
+            "imgs": imgs or [],
+            "svgs": svgs or [],
+        }
+    )
     proc = subprocess.run(
         ["node", "-e", _QR_PROBE_HARNESS],
         input=payload,
@@ -116,10 +125,11 @@ def _is_qr_visible_against(
     monkeypatch: pytest.MonkeyPatch,
     canvases=None,
     imgs=None,
+    svgs=None,
 ) -> bool:
     def fake_run(*args: str):
         assert args[0] == "eval"
-        out = _eval_qr_js(args[1], canvases=canvases, imgs=imgs)
+        out = _eval_qr_js(args[1], canvases=canvases, imgs=imgs, svgs=svgs)
         return subprocess.CompletedProcess(args=args, returncode=0, stdout=out, stderr="")
 
     monkeypatch.setattr(driver, "_run", fake_run)
@@ -349,6 +359,40 @@ def test_is_qr_visible_accepts_qr_img(monkeypatch: pytest.MonkeyPatch) -> None:
     driver = AgentBrowserDriver(binary="unused")
     img = {"width": 80, "height": 80, "alt": "QR code"}
     assert _is_qr_visible_against(driver, monkeypatch, imgs=[img]) is True
+
+def test_is_qr_visible_accepts_qr_svg(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Live Telegram Web A draws the login QR as SVG inside .qr-container.
+    driver = AgentBrowserDriver(binary="unused")
+    svg = {"width": 280, "height": 280, "parent": {"className": "qr-container"}}
+    assert _is_qr_visible_against(driver, monkeypatch, svgs=[svg]) is True
+
+def test_is_qr_visible_rejects_unrelated_svg(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = AgentBrowserDriver(binary="unused")
+    icon = {
+        "width": 280,
+        "height": 280,
+        "className": "icon",
+        "parent": {"className": "header"},
+    }
+    assert _is_qr_visible_against(driver, monkeypatch, svgs=[icon]) is False
+
+def test_is_qr_visible_accepts_svg_beside_tiny_lottie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Live page: 54x54 tlottie qr-plane plus 280x280 SVG QR. Tiny canvas must
+    # not hide the SVG.
+    driver = AgentBrowserDriver(binary="unused")
+    lottie = {
+        "width": 54,
+        "height": 54,
+        "pattern": "checker",
+        "className": "tlottie-canvas",
+        "parent": {"className": "AnimatedSticker qr-plane"},
+    }
+    svg = {"width": 280, "height": 280, "parent": {"className": "qr-container"}}
+    assert _is_qr_visible_against(
+        driver, monkeypatch, canvases=[lottie], svgs=[svg]
+    ) is True
 
 def test_wait_for_qr_returns_when_logged_in_without_qr(
     monkeypatch: pytest.MonkeyPatch,

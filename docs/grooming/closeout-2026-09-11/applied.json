@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "source_version": 4,
+  "context": {
+    "repository": "ultrabricks/qa-cli",
+    "repository_id": 1361425617,
+    "source_ref": "f707ee2b2f643a4621121187df442554aa968244",
+    "snapshot_run": "34541300125",
+    "mutations": "body only",
+    "manual_exclusions": []
+  },
+  "mode": "apply",
+  "started_at": "2026-09-10T23:38:22.772917+00:00",
+  "events": [
+    {
+      "key": "qa-cli#13",
+      "number": 13,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "122eec930188ec970ca68579ef3dce04278d9c8c65764847a7a697ddcaf9be57"
+    },
+    {
+      "key": "qa-cli#11",
+      "number": 11,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "22ac2353f9c415c656fac6c54552bdcfe24a35ae66f848726da106274d423d3f"
+    },
+    {
+      "key": "qa-cli#6",
+      "number": 6,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "365af48f2a4d7bcab516e7b1ae89d3591dfc146f37a6c524e22931a58bfbe8cf"
+    },
+    {
+      "key": "qa-cli#1",
+      "number": 1,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "c94dd549aa0a04aab5663dd27dc0a6ba229c691cd7193755bbd68d4614d98b2b"
+    },
+    {
+      "key": "qa-cli#8",
+      "number": 8,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "68db8e1c631c8a55390df8f3c81688bf4b0d2e5e64a8af8393b72f0827f12f30"
+    },
+    {
+      "key": "qa-cli#5",
+      "number": 5,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "bf1bad14deb13c01941d19e19c988414a14379e44c5c7c1a5e3bc2e25cdb7218"
+    },
+    {
+      "key": "qa-cli#9",
+      "number": 9,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "41786bc3f38c563416ee56b48ba9af8250a52dd6a7d3aa22e9803c588267a2b8"
+    },
+    {
+      "key": "qa-cli#3",
+      "number": 3,
+      "result": "patch-received-awaiting-readback",
+      "observed_before_sha256": "e646bbb41b1d82a9d353126a1fef36b583c05cbcd8f03bddb975dca1f420b520"
+    }
+  ],
+  "writes": 8,
+  "complete": true,
+  "fatal": null,
+  "product_acceptance": false,
+  "counts": {
+    "patch-received-awaiting-readback": 8
+  },
+  "final_readback": [
+    {
+      "key": "qa-cli#13",
+      "number": 13,
+      "result": "already_exact",
+      "actual_body_sha256": "6c9745bfa61c1318cfb360b1e78abc7ff395ca103c1ea65a48b0f771c082805e"
+    },
+    {
+      "key": "qa-cli#11",
+      "number": 11,
+      "result": "already_exact",
+      "actual_body_sha256": "92784323f8f89db7533f4a5e0af92e4dc9fe21af6b8282af99d859c324883d5c"
+    },
+    {
+      "key": "qa-cli#6",
+      "number": 6,
+      "result": "already_exact",
+      "actual_body_sha256": "29105d1be8d784b2af61745965a9fa09dfce01d55427b65fdf7b0c739f757e44"
+    },
+    {
+      "key": "qa-cli#1",
+      "number": 1,
+      "result": "already_exact",
+      "actual_body_sha256": "bd9a6028bebe39536a296c3f81c082f35ea0db8cb36733fd364882c12c7dd5cc"
+    },
+    {
+      "key": "qa-cli#8",
+      "number": 8,
+      "result": "already_exact",
+      "actual_body_sha256": "2f50e8d76a7fc4489d797810521b5a66effa0c6446d694167931b122c40d5ca8"
+    },
+    {
+      "key": "qa-cli#5",
+      "number": 5,
+      "result": "already_exact",
+      "actual_body_sha256": "7ea39969744ccb1e2d7c81ddf6881a420e0f0b24e27f0618bd3b9e62479107bf"
+    },
+    {
+      "key": "qa-cli#9",
+      "number": 9,
+      "result": "already_exact",
+      "actual_body_sha256": "d9b17c5f125de003ccc27495c6bcf0656e0c1c816b0b1ff3e1deb3a45aac6aef"
+    },
+    {
+      "key": "qa-cli#3",
+      "number": 3,
+      "result": "already_exact",
+      "actual_body_sha256": "a6b53c938141ca3a0df12316572cef8f9fe952da4c8391119494ca21b969b525"
+    }
+  ],
+  "verified_exact": 8,
+  "new_since_plan": [],
+  "planned": 8,
+  "remaining_or_conflicted": 0,
+  "finished_at": "2026-09-10T23:39:24.276244+00:00"
+}

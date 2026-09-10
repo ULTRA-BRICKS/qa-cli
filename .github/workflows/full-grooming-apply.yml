@@ -1,0 +1,49 @@
+name: Apply source-preserving full grooming
+on:
+  push:
+    branches: [docs/full-grooming-2026-09-10]
+    paths: [.github/workflows/full-grooming-apply.yml]
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: full-grooming-apply
+  cancel-in-progress: false
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Fetch the reviewed immutable engine without credentials
+        run: |
+          mkdir -p .grooming-engine
+          for f in apply.py apply_entry.py; do
+            curl --fail --silent --show-error --location "https://raw.githubusercontent.com/alex-mextner/rig-cli/94a1825f2f9e611031dd6b74eb1de2d8b3130c56/tools/grooming/$f" -o ".grooming-engine/$f"
+          done
+          python3 -m py_compile .grooming-engine/*.py
+      - name: Apply only the explicitly scoped reviewed issue plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .grooming-engine/apply_entry.py --repository "$GITHUB_REPOSITORY" --plan-ref 94a1825f2f9e611031dd6b74eb1de2d8b3130c56 --apply
+      - name: Preserve applied counts, conflicts and native-parent read-back
+        if: always()
+        run: |
+          if test -f grooming-results/applied.json; then
+            mkdir -p docs/grooming/full-2026-09-10
+            cp grooming-results/applied.json docs/grooming/full-2026-09-10/applied.json
+            git config user.name 'Rig grooming audit'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add docs/grooming/full-2026-09-10/applied.json
+            if ! git diff --cached --quiet; then
+              git commit -m 'docs(grooming): record actual issue updates and preserved conflicts'
+              git pull --rebase origin docs/full-grooming-2026-09-10
+              git push origin HEAD:docs/full-grooming-2026-09-10
+            fi
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: full-grooming-applied
+          path: grooming-results/
+          retention-days: 30

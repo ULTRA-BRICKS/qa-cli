@@ -53,6 +53,9 @@ function makeEl(spec, parent) {
     parentElement: parent || null,
     getAttribute(name) {
       if (name === 'aria-label') return spec.ariaLabel || '';
+      if (name === 'viewBox') return spec.viewBox || null;
+      if (name === 'width') return spec.widthAttr != null ? String(spec.widthAttr) : (spec.width ? String(spec.width) : null);
+      if (name === 'height') return spec.heightAttr != null ? String(spec.heightAttr) : (spec.height ? String(spec.height) : null);
       return null;
     },
     getContext() {
@@ -88,6 +91,20 @@ const canvases = (payload.canvases || []).map(withParent);
 const imgs = (payload.imgs || []).map(withParent);
 const svgs = (payload.svgs || []).map(withParent);
 global.document = {
+  querySelector(sel) {
+    if (sel === '.qr-container svg') {
+      for (const s of svgs) {
+        let p = s.parentElement;
+        while (p) {
+          const cls = typeof p.className === 'string' ? p.className : '';
+          if (cls.includes('qr-container')) return s;
+          p = p.parentElement;
+        }
+      }
+      return null;
+    }
+    return null;
+  },
   querySelectorAll(sel) {
     if (sel === 'canvas') return canvases;
     if (sel === 'img') return imgs;
@@ -319,14 +336,14 @@ def test_login_qr_wait_timeout_skips_screenshot(
     class QrTimeoutFake(FakeBrowserDriver):
         def wait_for_qr(self, timeout: float) -> None:
             self.calls.append(("wait_for_qr", timeout))
-            raise TimeoutError("timed out waiting for Telegram Web QR canvas")
+            raise TimeoutError("timed out waiting for Telegram Web QR code")
 
     fake = QrTimeoutFake(logged_in=False)
     code = main(["telegram", "login"], browser=fake)
     assert code == 1
     captured = capsys.readouterr()
     assert "timed out" in captured.err
-    assert "QR canvas" in captured.err
+    assert "QR code" in captured.err
     assert not any(c[0] == "screenshot" for c in fake.calls)
     assert not (tmp_path / "telegram-qr.png").exists()
 
@@ -393,6 +410,68 @@ def test_is_qr_visible_accepts_svg_beside_tiny_lottie(
     assert _is_qr_visible_against(
         driver, monkeypatch, canvases=[lottie], svgs=[svg]
     ) is True
+
+
+
+def test_is_qr_visible_accepts_viewbox_only_svg(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = AgentBrowserDriver(binary="unused")
+    svg = {
+        "viewBox": "0 0 280 280",
+        "clientWidth": 280,
+        "clientHeight": 280,
+        "parent": {"className": "qr-container"},
+    }
+    assert _is_qr_visible_against(driver, monkeypatch, svgs=[svg]) is True
+
+
+def test_wait_for_qr_detects_svg_after_delayed_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = AgentBrowserDriver(binary="unused")
+    polls = {"n": 0}
+
+    def fake_qr() -> bool:
+        polls["n"] += 1
+        return polls["n"] >= 3
+
+    monkeypatch.setattr(driver, "is_logged_in", lambda: False)
+    monkeypatch.setattr(driver, "is_qr_visible", fake_qr)
+    monkeypatch.setattr("qa_cli.browser.time.sleep", lambda _s: None)
+    driver.wait_for_qr(60.0)
+    assert polls["n"] >= 3
+
+
+def test_issue11_old_canvas_only_probe_misses_telegram_svg() -> None:
+    # qa-cli 0.1.0 only probed canvas/img; Telegram Web A paints the login QR as SVG.
+    old_js = (
+        "(() => {"
+        "  const canvases = Array.from(document.querySelectorAll('canvas'));"
+        "  for (const c of canvases) {"
+        "    const w = Math.max(c.width || 0, c.clientWidth || 0);"
+        "    const h = Math.max(c.height || 0, c.clientHeight || 0);"
+        "    if (w >= 80 && h >= 80) return 'qr-visible';"
+        "  }"
+        "  const imgs = Array.from(document.querySelectorAll('img'));"
+        "  for (const img of imgs) {"
+        "    const hay = ((img.alt || '') + ' ' + (img.className || '') + ' '"
+        "      + (img.id || '') + ' ' + (img.src || '')).toLowerCase();"
+        "    const w = Math.max(img.naturalWidth || 0, img.clientWidth || 0);"
+        "    const h = Math.max(img.naturalHeight || 0, img.clientHeight || 0);"
+        "    if (/qr/.test(hay) && w >= 80 && h >= 80) return 'qr-visible';"
+        "  }"
+        "  return 'qr-missing';"
+        "})()"
+    )
+    from qa_cli.browser import _QR_VISIBLE_JS
+
+    lottie = {
+        "width": 54,
+        "height": 54,
+        "pattern": "checker",
+        "className": "tlottie-canvas",
+        "parent": {"className": "AnimatedSticker qr-plane"},
+    }
+    svg = {"width": 280, "height": 280, "parent": {"className": "qr-container"}}
+    assert _eval_qr_js(old_js, canvases=[lottie], svgs=[svg]) == "qr-missing"
+    assert _eval_qr_js(_QR_VISIBLE_JS, canvases=[lottie], svgs=[svg]) == "qr-visible"
 
 def test_wait_for_qr_returns_when_logged_in_without_qr(
     monkeypatch: pytest.MonkeyPatch,

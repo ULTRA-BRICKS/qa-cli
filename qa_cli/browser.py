@@ -73,6 +73,27 @@ _QR_VISIBLE_JS = (
     "      return false;"
     "    } catch (e) { return false; }"
     "  };"
+    "  const svgSize = (s) => {"
+    "    const attrW = parseFloat(s.getAttribute && s.getAttribute('width')) || 0;"
+    "    const attrH = parseFloat(s.getAttribute && s.getAttribute('height')) || 0;"
+    "    const baseW = (s.width && s.width.baseVal && s.width.baseVal.value) || attrW;"
+    "    const baseH = (s.height && s.height.baseVal && s.height.baseVal.value) || attrH;"
+    "    let vbW = 0, vbH = 0;"
+    "    const vb = s.getAttribute && s.getAttribute('viewBox');"
+    "    if (vb) {"
+    "      const p = vb.trim().split(/\\s+/);"
+    "      if (p.length === 4) { vbW = parseFloat(p[2]) || 0; vbH = parseFloat(p[3]) || 0; }"
+    "    }"
+    "    return {"
+    "      w: Math.max(baseW, vbW, s.clientWidth || 0),"
+    "      h: Math.max(baseH, vbH, s.clientHeight || 0)"
+    "    };"
+    "  };"
+    "  const qrSvg = document.querySelector('.qr-container svg');"
+    "  if (qrSvg) {"
+    "    const { w, h } = svgSize(qrSvg);"
+    "    if (w >= 80 && h >= 80) return 'qr-visible';"
+    "  }"
     "  const canvases = Array.from(document.querySelectorAll('canvas'));"
     "  for (const c of canvases) {"
     "    const w = Math.max(c.width || 0, c.clientWidth || 0);"
@@ -87,10 +108,7 @@ _QR_VISIBLE_JS = (
     "  }"
     "  const svgs = Array.from(document.querySelectorAll('svg'));"
     "  for (const s of svgs) {"
-    "    const baseW = (s.width && s.width.baseVal && s.width.baseVal.value) || 0;"
-    "    const baseH = (s.height && s.height.baseVal && s.height.baseVal.value) || 0;"
-    "    const w = Math.max(typeof s.width === 'number' ? s.width : 0, baseW, s.clientWidth || 0);"
-    "    const h = Math.max(typeof s.height === 'number' ? s.height : 0, baseH, s.clientHeight || 0);"
+    "    const { w, h } = svgSize(s);"
     "    if (isQrRelated(s) && w >= 80 && h >= 80) return 'qr-visible';"
     "  }"
     "  return 'qr-missing';"
@@ -176,7 +194,7 @@ class AgentBrowserDriver:
             if self.is_logged_in() or self.is_qr_visible():
                 return
             time.sleep(0.5)
-        raise TimeoutError("timed out waiting for Telegram Web QR canvas")
+        raise TimeoutError("timed out waiting for Telegram Web QR code")
 
     def wait_until_logged_in(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout

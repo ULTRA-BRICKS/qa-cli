@@ -1,0 +1,105 @@
+{
+  "repository": "alex-mextner/qa-cli",
+  "plan_ref": "94a1825f2f9e611031dd6b74eb1de2d8b3130c56",
+  "plan_sha256": "0ff808abaf99ba5818754f9971b6d622660431a8781c52487948cf499012c7f8",
+  "started_at": "2026-09-10T13:30:09.181087+00:00",
+  "mode": "apply",
+  "events": [
+    {
+      "number": 13,
+      "result": "parent-created",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/13"
+    },
+    {
+      "number": 1,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "c94dd549aa0a04aab5663dd27dc0a6ba229c691cd7193755bbd68d4614d98b2b",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/1"
+    },
+    {
+      "number": 3,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "e646bbb41b1d82a9d353126a1fef36b583c05cbcd8f03bddb975dca1f420b520",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/3"
+    },
+    {
+      "number": 5,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "bf1bad14deb13c01941d19e19c988414a14379e44c5c7c1a5e3bc2e25cdb7218",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/5"
+    },
+    {
+      "number": 6,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "365af48f2a4d7bcab516e7b1ae89d3591dfc146f37a6c524e22931a58bfbe8cf",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/6"
+    },
+    {
+      "number": 8,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "68db8e1c631c8a55390df8f3c81688bf4b0d2e5e64a8af8393b72f0827f12f30",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/8"
+    },
+    {
+      "number": 9,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "41786bc3f38c563416ee56b48ba9af8250a52dd6a7d3aa22e9803c588267a2b8",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/9"
+    },
+    {
+      "number": 11,
+      "result": "body-updated-readback-verified",
+      "body_sha256": "22ac2353f9c415c656fac6c54552bdcfe24a35ae66f848726da106274d423d3f",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/11"
+    }
+  ],
+  "parents": {
+    "1": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/13",
+      "verified_parent": "https://github.com/alex-mextner/qa-cli/issues/13"
+    },
+    "3": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/13",
+      "verified_parent": "https://github.com/alex-mextner/qa-cli/issues/13"
+    },
+    "5": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/13",
+      "verified_parent": "https://github.com/alex-mextner/qa-cli/issues/13"
+    },
+    "6": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/13",
+      "verified_parent": "https://github.com/alex-mextner/qa-cli/issues/13"
+    },
+    "8": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/13",
+      "verified_parent": "https://github.com/alex-mextner/qa-cli/issues/13"
+    },
+    "9": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/13",
+      "verified_parent": "https://github.com/alex-mextner/qa-cli/issues/13"
+    },
+    "11": {
+      "status": "linked",
+      "url": "https://github.com/alex-mextner/qa-cli/issues/13",
+      "verified_parent": "https://github.com/alex-mextner/qa-cli/issues/13"
+    }
+  },
+  "newly_discovered": [],
+  "counts": {
+    "parent-created": 1,
+    "body-updated-readback-verified": 7
+  },
+  "api_reads": 11,
+  "api_writes": 20,
+  "root": "https://github.com/alex-mextner/qa-cli/issues/13",
+  "finished_at": "2026-09-10T13:30:47.829221+00:00",
+  "planned_issues": 7,
+  "processed_bodies": 7,
+  "native_parents_verified": 7
+}

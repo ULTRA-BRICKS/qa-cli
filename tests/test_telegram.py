@@ -10,6 +10,7 @@ never send chat messages.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -22,8 +23,9 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from qa_cli.browser import AgentBrowserDriver  # noqa: E402
+from qa_cli.browser import AgentBrowserDriver, AuthStatus  # noqa: E402
 from qa_cli.cli import main  # noqa: E402
+from qa_cli.telegram import login, render_qr_ascii  # noqa: E402
 
 TELEGRAM_WEB = "https://web.telegram.org/a/"
 
@@ -152,13 +154,55 @@ def _is_qr_visible_against(
     monkeypatch.setattr(driver, "_run", fake_run)
     return driver.is_qr_visible()
 
+_AUTH_STATUS_HARNESS = """
+const payload = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+global.document = {
+  querySelector(sel) {
+    if (sel === '[id^="auth-"][id$="-form"]') {
+      return payload.formId ? { id: payload.formId } : null;
+    }
+    if (sel === '.is-auth') {
+      return payload.isAuth ? {} : null;
+    }
+    return null;
+  }
+};
+const result = eval(payload.js);
+process.stdout.write(String(result));
+"""
+
+def _eval_auth_status_js(js: str, *, form_id=None, is_auth: bool = False) -> dict:
+    """Run production auth-status JS against a stub document (no Chromium)."""
+    payload = json.dumps({"js": js, "formId": form_id, "isAuth": is_auth})
+    proc = subprocess.run(
+        ["node", "-e", _AUTH_STATUS_HARNESS],
+        input=payload,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr or proc.stdout or "auth status harness failed")
+    return json.loads(proc.stdout.strip())
+
+
 class FakeBrowserDriver:
     """Test double: records calls, never shells out."""
 
-    def __init__(self, logged_in: bool = False) -> None:
+    def __init__(
+        self,
+        logged_in: bool = False,
+        waiting_form=None,
+        qr_tokens=None,
+        become_logged_in_after: int = 1,
+    ) -> None:
         self.logged_in = logged_in
+        self.waiting_form = waiting_form
         self.calls: list[tuple] = []
         self.qr_ready = False
+        self._qr_tokens = list(qr_tokens) if qr_tokens is not None else ["FAKE_QR_TOKEN"]
+        self._become_logged_in_after = become_logged_in_after
+        self._auth_status_calls = 0
 
     def open(self, url: str) -> None:
         self.calls.append(("open", url))
@@ -175,13 +219,32 @@ class FakeBrowserDriver:
         self.calls.append(("is_logged_in",))
         return self.logged_in
 
+    def auth_status(self) -> AuthStatus:
+        self.calls.append(("auth_status",))
+        if not self.logged_in and self.qr_ready:
+            self._auth_status_calls += 1
+            if self._auth_status_calls > self._become_logged_in_after:
+                self.logged_in = True
+        if self.logged_in:
+            return AuthStatus(logged_in=True, waiting_form=None)
+        return AuthStatus(logged_in=False, waiting_form=self.waiting_form)
+
+    def get_qr_token(self):
+        self.calls.append(("get_qr_token",))
+        if not self._qr_tokens:
+            return None
+        token = self._qr_tokens[0]
+        if len(self._qr_tokens) > 1:
+            self._qr_tokens.pop(0)
+        return token
+
+    def diagnostic_dump(self) -> str:
+        self.calls.append(("diagnostic_dump",))
+        return "title='Telegram' url='https://web.telegram.org/a/' text='Log in to Telegram by QR Code'"
+
     def wait_for_qr(self, timeout: float) -> None:
         self.calls.append(("wait_for_qr", timeout))
         self.qr_ready = True
-
-    def wait_until_logged_in(self, timeout: float) -> None:
-        self.calls.append(("wait_until_logged_in", timeout))
-        self.logged_in = True
 
 def test_help_lists_telegram_login(capsys: pytest.CaptureFixture[str]) -> None:
     code = main(["--help"])
@@ -208,6 +271,7 @@ def test_login_saves_qr_when_logged_out(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
     fake = FakeBrowserDriver(logged_in=False)
     code = main(["telegram", "login"], browser=fake)
     assert code == 0
@@ -218,12 +282,14 @@ def test_login_saves_qr_when_logged_out(
     assert str(qr) in out
     assert fake.calls[0] == ("open", TELEGRAM_WEB)
     assert any(c[0] == "screenshot" for c in fake.calls)
-    assert any(c[0] == "wait_until_logged_in" for c in fake.calls)
+    assert any(c[0] == "auth_status" for c in fake.calls)
+    assert "logged-in" in out
 
 def test_login_screenshots_only_after_qr_ready(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
     fake = FakeBrowserDriver(logged_in=False)
     code = main(["telegram", "login"], browser=fake)
     assert code == 0
@@ -247,7 +313,7 @@ def test_login_skips_qr_when_already_logged_in(
     assert "logged-in" in out
     assert not any(c[0] == "screenshot" for c in fake.calls)
     assert not any(c[0] == "wait_for_qr" for c in fake.calls)
-    assert not any(c[0] == "wait_until_logged_in" for c in fake.calls)
+    assert not any(c[0] == "auth_status" for c in fake.calls)
 
 def test_agent_browser_argv_uses_agent_browser_not_telegram_app(
     monkeypatch: pytest.MonkeyPatch,
@@ -281,7 +347,7 @@ def test_status_logged_out_without_session(
     out = capsys.readouterr().out
     assert "logged-out" in out
     assert "qa-telegram" in out
-    assert not any(c[0] == "wait_until_logged_in" for c in fake.calls)
+    assert not any(c[0] == "wait_for_qr" for c in fake.calls)
 
 def test_status_logged_in_when_fake_says_so(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
@@ -318,15 +384,31 @@ def test_login_timeout_exits_nonzero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
-
-    class TimeoutFake(FakeBrowserDriver):
-        def wait_until_logged_in(self, timeout: float) -> None:
-            raise TimeoutError("timed out waiting for Telegram Web QR login")
-
-    code = main(["telegram", "login"], browser=TimeoutFake(logged_in=False))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    times = iter([0.0, 1000.0])
+    monkeypatch.setattr("qa_cli.telegram.time.monotonic", lambda: next(times, 100000.0))
+    fake = FakeBrowserDriver(logged_in=False, become_logged_in_after=10**9)
+    code = main(["telegram", "login"], browser=fake)
     assert code == 1
     captured = capsys.readouterr()
     assert "timed out" in captured.err
+
+def test_login_timeout_includes_diagnostic_dump_and_last_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    times = iter([0.0, 1000.0])
+    monkeypatch.setattr("qa_cli.telegram.time.monotonic", lambda: next(times, 100000.0))
+    fake = FakeBrowserDriver(
+        logged_in=False, waiting_form="auth-password-form", become_logged_in_after=10**9
+    )
+    code = main(["telegram", "login"], browser=fake)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "auth-password-form" in err
+    assert "title=" in err and "url=" in err
+    assert any(c[0] == "diagnostic_dump" for c in fake.calls)
 
 def test_login_qr_wait_timeout_skips_screenshot(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
@@ -508,7 +590,7 @@ def test_login_skips_screenshot_when_logged_in_during_qr_wait(
     out = capsys.readouterr().out
     assert "logged-in" in out
     assert not any(c[0] == "screenshot" for c in fake.calls)
-    assert not any(c[0] == "wait_until_logged_in" for c in fake.calls)
+    assert not any(c[0] == "auth_status" for c in fake.calls)
 
 def test_unknown_command_exits_2() -> None:
     assert main(["nope"]) == 2
@@ -524,3 +606,120 @@ def test_live_status_skips_unless_env() -> None:
     # Opt-in only. Must not send chat messages. 127 if agent-browser is missing.
     code = main(["telegram", "status"])
     assert code in (0, 127)
+
+# --- auth_status() / _AUTH_STATUS_JS -------------------------------------
+
+def test_auth_status_js_detects_qr_form() -> None:
+    from qa_cli.browser import _AUTH_STATUS_JS
+
+    result = _eval_auth_status_js(_AUTH_STATUS_JS, form_id="auth-qr-form")
+    assert result == {"loggedIn": False, "waitingForm": "auth-qr-form"}
+
+def test_auth_status_js_reports_unsupported_auth_step() -> None:
+    # e.g. Telegram requiring a 2FA cloud password after a successful QR scan —
+    # must be reported distinctly, not conflated with "still waiting for scan".
+    from qa_cli.browser import _AUTH_STATUS_JS
+
+    result = _eval_auth_status_js(_AUTH_STATUS_JS, form_id="auth-password-form")
+    assert result == {"loggedIn": False, "waitingForm": "auth-password-form"}
+
+def test_auth_status_js_detects_still_authenticating_without_form() -> None:
+    from qa_cli.browser import _AUTH_STATUS_JS
+
+    result = _eval_auth_status_js(_AUTH_STATUS_JS, is_auth=True)
+    assert result == {"loggedIn": False, "waitingForm": None}
+
+def test_auth_status_js_detects_logged_in_when_auth_ui_gone() -> None:
+    # Telegram Web A removes .is-auth entirely once authorizationStateReady;
+    # this app has no #LeftColumn/#column-left, so absence is the signal.
+    from qa_cli.browser import _AUTH_STATUS_JS
+
+    result = _eval_auth_status_js(_AUTH_STATUS_JS)
+    assert result == {"loggedIn": True, "waitingForm": None}
+
+def test_auth_status_decodes_agent_browser_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = AgentBrowserDriver(binary="unused")
+
+    def fake_run(*args: str):
+        assert args[0] == "eval"
+        inner = json.dumps({"loggedIn": False, "waitingForm": "auth-password-form"})
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(inner), stderr="")
+
+    monkeypatch.setattr(driver, "_run", fake_run)
+    assert driver.auth_status() == AuthStatus(logged_in=False, waiting_form="auth-password-form")
+
+def test_get_qr_token_decodes_agent_browser_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = AgentBrowserDriver(binary="unused")
+
+    def fake_run(*args: str):
+        inner = json.dumps({"token": "AQABC123"})
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(inner), stderr="")
+
+    monkeypatch.setattr(driver, "_run", fake_run)
+    assert driver.get_qr_token() == "AQABC123"
+
+def test_get_qr_token_returns_none_before_hook_captures_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = AgentBrowserDriver(binary="unused")
+
+    def fake_run(*args: str):
+        inner = json.dumps({"token": None})
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(inner), stderr="")
+
+    monkeypatch.setattr(driver, "_run", fake_run)
+    assert driver.get_qr_token() is None
+
+def test_diagnostic_dump_formats_page_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = AgentBrowserDriver(binary="unused")
+
+    def fake_run(*args: str):
+        inner = json.dumps(
+            {"title": "Telegram", "url": TELEGRAM_WEB, "text": "Log in to Telegram by QR Code"}
+        )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(inner), stderr="")
+
+    monkeypatch.setattr(driver, "_run", fake_run)
+    dump = driver.diagnostic_dump()
+    assert "Telegram" in dump
+    assert TELEGRAM_WEB in dump
+    assert "Log in to Telegram by QR Code" in dump
+
+# --- terminal QR rendering -------------------------------------------------
+
+def test_render_qr_ascii_produces_multiline_unicode_block() -> None:
+    art = render_qr_ascii("tg://login?token=ABCDEFGHIJ")
+    lines = art.splitlines()
+    assert len(lines) > 5
+    assert any(ch in art for ch in "█▄▀")
+
+def test_login_redraws_terminal_qr_on_token_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    fake = FakeBrowserDriver(
+        logged_in=False, qr_tokens=["TOKEN_A", "TOKEN_B"], become_logged_in_after=3
+    )
+    buf = io.StringIO()
+    code = login(fake, out=buf)
+    assert code == 0
+    rendered = buf.getvalue()
+    # Exactly one in-place redraw: the token rotates from TOKEN_A to TOKEN_B once.
+    assert rendered.count("\x1b[2J") == 1
+    assert [c[0] for c in fake.calls].count("screenshot") == 2
+
+def test_login_reports_unsupported_auth_step_distinctly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    fake = FakeBrowserDriver(
+        logged_in=False, waiting_form="auth-password-form", become_logged_in_after=1
+    )
+    buf = io.StringIO()
+    code = login(fake, out=buf)
+    assert code == 0
+    rendered = buf.getvalue()
+    assert "auth-password-form" in rendered
+    assert not any(c[0] == "screenshot" for c in fake.calls)

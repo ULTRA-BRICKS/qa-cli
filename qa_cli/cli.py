@@ -55,11 +55,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Open Telegram Web, save QR if needed, wait until logged in",
         description=(
             "Open https://web.telegram.org/a/ via agent-browser (session "
-            "qa-telegram). If not logged in, wait until the QR is visible "
-            "(painted canvas, img, or svg), save a screenshot to "
-            "~/.config/qa-cli/telegram-qr.png and print that path. Scan "
-            "with the Telegram phone app. If already logged in, print "
-            "status and skip QR."
+            "qa-telegram). If not logged in, wait until the QR is visible, "
+            "then render it directly in the terminal -- auto-refreshing as "
+            "Telegram rotates the token roughly every 20-30s -- while also "
+            "saving a screenshot to ~/.config/qa-cli/telegram-qr.png. Scan "
+            "with the Telegram phone app. If Telegram requires an extra "
+            "step this CLI can't automate (e.g. a two-factor password), "
+            "that is reported distinctly instead of hanging until timeout. "
+            "If already logged in, print status and skip QR."
         ),
     )
     tg_sub.add_parser(

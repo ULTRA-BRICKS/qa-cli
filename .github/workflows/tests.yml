@@ -31,7 +31,7 @@ jobs:
         python-version: ["3.9", "3.12"]
     env:
       TEST_PATHS: tests
-      TEST_EXTRA_DEPS: ""
+      TEST_EXTRA_DEPS: "qrcode"
       PYTEST_SPEC: "pytest>=8,<9"
     steps:
       - name: Checkout

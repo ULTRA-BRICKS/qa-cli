@@ -9,7 +9,7 @@ name = "qa-cli"
 dynamic = ["version"]
 description = "Headless Telegram Web testing via agent-browser."
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["qrcode>=7.4,<9"]
 
 [project.scripts]
 qa = "qa_cli.cli:main"

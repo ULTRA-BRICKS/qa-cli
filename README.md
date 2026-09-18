@@ -1,8 +1,33 @@
-qa-cli drives Telegram Web (https://web.telegram.org/a/) in headless Chromium via the agent-browser CLI: `qa telegram login` renders the QR directly in your terminal (auto-refreshing as Telegram rotates it, roughly every 20-30s) so you can scan it without opening any file, and also saves a screenshot to ~/.config/qa-cli/telegram-qr.png. It persists the `qa-telegram` session so re-runs skip login, and never opens Telegram.app or sends chat messages. Default tests are hermetic (a fake browser; no network). Live QR uses agent-browser headless; set `QA_TELEGRAM_LIVE=1` to opt into the live pytest.
+# qa-cli
 
-```
-qa telegram login     # renders a scannable QR in your terminal (also saves ~/.config/qa-cli/telegram-qr.png)
+Telegram Web QA through `agent-browser`, using the persistent `qa-telegram` session.
+
+```sh
+qa telegram login
 qa telegram status
 ```
 
-Install: `pipx install git+https://github.com/alex-mextner/qa-cli` (or `./install.sh`; pipx-first, symlink fallback).
+In an interactive terminal login uses an alternate-screen QR view, refreshes the
+QR when Telegram rotates it, and restores the terminal/cursor on exit. The first
+QR frame is read with Chromium's native barcode decoder; a module-hook fallback
+is retained for browsers without that API. A blank or loading page is never
+reported as authenticated. Browser subprocesses have a finite timeout.
+
+If Telegram asks for a cloud password or another manual step, login exits with
+code 3 and identifies that step instead of waiting silently. Complete it only in
+the same trusted browser session. Never send OTPs or passwords to a bot or chat.
+Ctrl-C exits with code 130. QR screenshots are written with private permissions
+under `~/.config/qa-cli/telegram-qr.png`. They are credentials: do not attach live
+QRs or browser session state to issues, PRs, logs or public QA reports.
+
+Non-interactive output does not emit terminal-control sequences. Tests use fake
+browsers and explicitly synthetic QR payloads. A live QR capture proves only QR
+capture, not successful account authentication or bot behavior.
+
+```sh
+uv run --no-project --with 'pytest>=8,<9' --with qrcode pytest tests -q
+```
+
+Install from the current checkout with `pipx install --force .` (or `./install.sh`).
+The maintained repository is on Forgejo under `ultrabricks/qa-cli`; the old
+GitHub repository is archived. This package does not send chat messages by default.

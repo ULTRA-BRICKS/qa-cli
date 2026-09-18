@@ -13,9 +13,11 @@ QR frame is read with Chromium's native barcode decoder; a module-hook fallback
 is retained for browsers without that API. A blank or loading page is never
 reported as authenticated. Browser subprocesses have a finite timeout.
 
-If Telegram asks for a cloud password or another manual step, login exits with
-code 3 and identifies that step instead of waiting silently. Complete it only in
-the same trusted browser session. Never send OTPs or passwords to a bot or chat.
+If Telegram asks for its two-factor cloud password, login prompts for it right
+in the terminal (masked, like a normal password prompt) and submits it directly
+into the live page -- no headed browser needed. A wrong password, or any other
+manual step this CLI can't automate, is reported distinctly instead of hanging
+silently or falsely reporting success. Never send OTPs or passwords to a bot or chat.
 Ctrl-C exits with code 130. QR screenshots are written with private permissions
 under `~/.config/qa-cli/telegram-qr.png`. They are credentials: do not attach live
 QRs or browser session state to issues, PRs, logs or public QA reports.

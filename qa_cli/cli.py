@@ -60,10 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
             "then render it directly in the terminal -- auto-refreshing as "
             "Telegram rotates the token roughly every 20-30s -- while also "
             "saving a screenshot to ~/.config/qa-cli/telegram-qr.png. Scan "
-            "with the Telegram phone app. If Telegram requires an extra "
-            "step this CLI can't automate (e.g. a two-factor password), "
-            "that is reported distinctly instead of hanging until timeout. "
-            "If already logged in, print status and skip QR."
+            "with the Telegram phone app. If Telegram then asks for its "
+            "two-factor cloud password, this prompts for it in the "
+            "terminal (masked, like a normal password prompt) and submits "
+            "it into the page directly. Any other auth step this CLI "
+            "can't automate is reported distinctly instead of hanging "
+            "until timeout. If already logged in, print status and skip QR."
         ),
     )
     tg_sub.add_parser(

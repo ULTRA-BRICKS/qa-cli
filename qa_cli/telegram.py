@@ -12,13 +12,18 @@ token roughly every 20-30s, so a screenshot-only flow can go stale before the
 user notices it. The render loop polls browser.get_qr_token() and redraws in
 place (ANSI clear + reprint) whenever the token changes, and polls
 browser.auth_status() to detect both success and any Telegram auth substep
-this CLI cannot automate (e.g. a 2FA cloud-password prompt), reporting the
-latter distinctly instead of hanging silently until timeout. The PNG
-screenshot is still written on every redraw for tooling that reads the file
-directly.
+this CLI cannot automate, reporting it distinctly instead of hanging
+silently until timeout -- except Telegram's cloud-password (2FA) step,
+`auth-password-form`, which IS handled: once it persists across the usual
+two-poll debounce, `_prompt_and_submit_password` prompts for it with
+`getpass.getpass` (masked, never echoed/logged/written anywhere) and submits
+it directly into the live page via `browser.submit_password`. The PNG
+screenshot is still written on every QR redraw for tooling that reads the
+file directly.
 """
 from __future__ import annotations
 
+import getpass
 import io
 import os
 import sys
@@ -29,7 +34,14 @@ from pathlib import Path
 import qrcode
 
 from qa_cli.browser import (
-    SESSION_NAME, TELEGRAM_WEB_URL, AuthStatus, AuthStepRequiredError, BrowserDriver,
+    SESSION_NAME,
+    TELEGRAM_WEB_URL,
+    AUTH_PASSWORD_FORM_ID,
+    AUTH_QR_FORM_ID,
+    AuthPasswordRejectedError,
+    AuthStatus,
+    AuthStepRequiredError,
+    BrowserDriver,
 )
 
 DEFAULT_LOGIN_TIMEOUT = 300.0
@@ -37,6 +49,15 @@ DEFAULT_QR_WAIT_TIMEOUT = 60.0
 DEFAULT_POLL_INTERVAL = 1.0
 
 _QR_URL_PREFIX = "tg://login?token="
+
+_MANUAL_STEP_FALLBACK = "finish this step manually in a headed browser session, then re-run"
+
+# Telegram's cloud-password check is a network round trip (its own SRP
+# verification API call), not instant -- a single poll right after submit
+# would misreport a slow-but-correct password as rejected. Bounded so a
+# genuinely wrong password (or a submission that silently failed) is still
+# reported within a few seconds, never retried silently forever.
+_PASSWORD_CONFIRM_POLLS = 5
 
 
 def config_dir() -> Path:
@@ -61,12 +82,13 @@ def render_qr_ascii(data: str) -> str:
 
 
 def _describe_wait(waiting_form):
-    if waiting_form in (None, "auth-qr-form"):
+    if waiting_form in (None, AUTH_QR_FORM_ID):
         return "waiting for QR scan"
+    if waiting_form == AUTH_PASSWORD_FORM_ID:
+        return "waiting on the Telegram two-factor cloud password step (auth-password-form)"
     return (
         f"waiting on Telegram auth step '{waiting_form}' — this qa-cli flow "
-        "cannot complete it automatically (e.g. a two-factor cloud "
-        "password); finish it manually in a headed browser, then re-run"
+        f"cannot complete it automatically; {_MANUAL_STEP_FALLBACK}"
     )
 
 
@@ -95,6 +117,50 @@ class _TerminalQrPainter:
         self._drawn = True
 
 
+def _prompt_and_submit_password(browser: BrowserDriver, painter: _TerminalQrPainter) -> None:
+    """Prompt for Telegram's cloud password in the terminal (masked) and
+    submit it into the live page.
+
+    The password is never logged, printed, written to a file, or included
+    in any exception message -- it exists only as this function's local
+    `password` variable until it is handed to `browser.submit_password`,
+    which itself sends it to agent-browser over subprocess stdin, never argv.
+    """
+    painter.render(
+        "Telegram requires the two-factor cloud password -- "
+        "check this terminal for a masked password prompt."
+    )
+    try:
+        password = getpass.getpass("Telegram cloud password (input hidden): ")
+    except (EOFError, OSError) as exc:
+        raise AuthStepRequiredError(
+            "Telegram requires the two-factor cloud password, but this "
+            "terminal has no interactive input to prompt for it; re-run "
+            f"from an interactive terminal, or {_MANUAL_STEP_FALLBACK}"
+        ) from exc
+    if not password:
+        raise AuthStepRequiredError(
+            "Telegram requires the two-factor cloud password, but none "
+            f"was entered; re-run and type the password, or {_MANUAL_STEP_FALLBACK}"
+        )
+    browser.submit_password(password)
+
+
+def _confirm_password_step(browser: BrowserDriver, poll_interval: float) -> AuthStatus:
+    """After `browser.submit_password`, poll until `auth-password-form`
+    clears (success, or Telegram moved to a different next step) or it
+    persists across `_PASSWORD_CONFIRM_POLLS` polls, in which case the
+    password was rejected (or the submission silently failed).
+    """
+    for _ in range(_PASSWORD_CONFIRM_POLLS):
+        time.sleep(poll_interval)
+        status = browser.auth_status()
+        if status.waiting_form != AUTH_PASSWORD_FORM_ID:
+            return status
+    raise AuthPasswordRejectedError(
+        "Telegram rejected the password (or another step is required); re-run to try again"
+    )
+
 def _run_qr_login_loop(
     browser: BrowserDriver,
     timeout: float,
@@ -116,7 +182,7 @@ def _run_qr_login_loop(
                     "timed out waiting for Telegram Web QR login "
                     f"({_describe_wait(status.waiting_form)}) [{dump}]"
                 )
-            if status.waiting_form in (None, "auth-qr-form"):
+            if status.waiting_form in (None, AUTH_QR_FORM_ID):
                 manual_form = None
                 manual_polls = 0
                 token = browser.get_qr_token()
@@ -143,7 +209,13 @@ def _run_qr_login_loop(
                 manual_polls = manual_polls + 1 if manual_form == status.waiting_form else 1
                 manual_form = status.waiting_form
                 if manual_polls >= 2:
-                    raise AuthStepRequiredError(_describe_wait(status.waiting_form))
+                    if status.waiting_form != AUTH_PASSWORD_FORM_ID:
+                        raise AuthStepRequiredError(_describe_wait(status.waiting_form))
+                    _prompt_and_submit_password(browser, painter)
+                    status = _confirm_password_step(browser, poll_interval)
+                    manual_form = None
+                    manual_polls = 0
+                    continue
                 painter.render("Telegram is changing authentication state…")
             time.sleep(poll_interval)
             status = browser.auth_status()

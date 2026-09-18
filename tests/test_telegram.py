@@ -157,7 +157,9 @@ def _is_qr_visible_against(
 _AUTH_STATUS_HARNESS = """
 const payload = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 global.document = {
+  querySelectorAll(sel) { return payload.formId ? [{ id: payload.formId }] : []; },
   querySelector(sel) {
+    if (sel.includes('#LeftColumn')) return payload.hasShell ? {} : null;
     if (sel === '[id^="auth-"][id$="-form"]') {
       return payload.formId ? { id: payload.formId } : null;
     }
@@ -171,9 +173,9 @@ const result = eval(payload.js);
 process.stdout.write(String(result));
 """
 
-def _eval_auth_status_js(js: str, *, form_id=None, is_auth: bool = False) -> dict:
+def _eval_auth_status_js(js: str, *, form_id=None, is_auth: bool = False, has_shell: bool = False) -> dict:
     """Run production auth-status JS against a stub document (no Chromium)."""
-    payload = json.dumps({"js": js, "formId": form_id, "isAuth": is_auth})
+    payload = json.dumps({"js": js, "formId": form_id, "isAuth": is_auth, "hasShell": has_shell})
     proc = subprocess.run(
         ["node", "-e", _AUTH_STATUS_HARNESS],
         input=payload,
@@ -634,7 +636,7 @@ def test_auth_status_js_detects_logged_in_when_auth_ui_gone() -> None:
     # this app has no #LeftColumn/#column-left, so absence is the signal.
     from qa_cli.browser import _AUTH_STATUS_JS
 
-    result = _eval_auth_status_js(_AUTH_STATUS_JS)
+    result = _eval_auth_status_js(_AUTH_STATUS_JS, has_shell=True)
     assert result == {"loggedIn": True, "waitingForm": None}
 
 def test_auth_status_decodes_agent_browser_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -683,7 +685,7 @@ def test_diagnostic_dump_formats_page_state(monkeypatch: pytest.MonkeyPatch) -> 
     dump = driver.diagnostic_dump()
     assert "Telegram" in dump
     assert TELEGRAM_WEB in dump
-    assert "Log in to Telegram by QR Code" in dump
+    assert "Log in to Telegram by QR Code" not in dump
 
 # --- terminal QR rendering -------------------------------------------------
 
@@ -706,7 +708,7 @@ def test_login_redraws_terminal_qr_on_token_rotation(
     assert code == 0
     rendered = buf.getvalue()
     # Exactly one in-place redraw: the token rotates from TOKEN_A to TOKEN_B once.
-    assert rendered.count("\x1b[2J") == 1
+    assert "\x1b[2J" not in rendered  # redirected output is not a TUI
     assert [c[0] for c in fake.calls].count("screenshot") == 2
 
 def test_login_reports_unsupported_auth_step_distinctly(
@@ -715,11 +717,11 @@ def test_login_reports_unsupported_auth_step_distinctly(
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
     fake = FakeBrowserDriver(
-        logged_in=False, waiting_form="auth-password-form", become_logged_in_after=1
+        logged_in=False, waiting_form="auth-password-form", become_logged_in_after=99
     )
     buf = io.StringIO()
-    code = login(fake, out=buf)
-    assert code == 0
+    from qa_cli.browser import AuthStepRequiredError
+    with pytest.raises(AuthStepRequiredError, match="auth-password-form"):
+        login(fake, out=buf)
     rendered = buf.getvalue()
-    assert "auth-password-form" in rendered
     assert not any(c[0] == "screenshot" for c in fake.calls)

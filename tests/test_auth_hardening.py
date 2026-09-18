@@ -1,0 +1,179 @@
+import io
+import json
+import subprocess
+import sys
+from pathlib import Path
+import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from qa_cli.browser import AgentBrowserDriver, BrowserError, _AUTH_STATUS_JS
+from qa_cli.telegram import _TerminalQrPainter
+
+def test_blank_page_is_not_authenticated():
+    script = "global.document={readyState:'complete',querySelector:()=>null,querySelectorAll:()=>[]};console.log(" + _AUTH_STATUS_JS + ")"
+    value = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    assert value["loggedIn"] is False
+
+def test_subprocess_has_finite_timeout(monkeypatch):
+    seen = {}
+    def run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", run)
+    AgentBrowserDriver(binary="fake").open("https://web.telegram.org/a/")
+    assert 0 < seen.get("timeout", 0) <= 45
+
+def test_timeout_does_not_leak_command_or_page_content(monkeypatch):
+    def run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 10, output="PRIVATE_BODY", stderr="PRIVATE_ERROR")
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(BrowserError) as error:
+        AgentBrowserDriver(binary="fake")._run("eval", "PRIVATE_TOKEN")
+    assert "PRIVATE" not in str(error.value)
+
+def test_first_qr_frame_does_not_wait_for_library_rotation(monkeypatch):
+    driver = AgentBrowserDriver(binary="fake")
+    def probe(script):
+        return {"token": "SYNTHETIC"} if "BarcodeDetector" in script else {"token": None}
+    monkeypatch.setattr(driver, "_eval_json", probe)
+    assert driver.get_qr_token() == "SYNTHETIC"
+
+def test_string_false_is_not_authenticated(monkeypatch):
+    driver = AgentBrowserDriver(binary="fake")
+    monkeypatch.setattr(driver, "_eval_json", lambda script: {"loggedIn": "false", "waitingForm": None})
+    assert driver.is_logged_in() is False
+
+
+def test_tui_restores_screen_and_cursor():
+    class Terminal(io.StringIO):
+        def isatty(self): return True
+    out = Terminal()
+    painter = _TerminalQrPainter(out)
+    try:
+        painter.render("Waiting", "SYNTHETIC_QR")
+        painter.render("Refreshed", "SYNTHETIC_QR_2")
+    finally:
+        painter.close()
+    text = out.getvalue()
+    assert text.startswith("\x1b[?1049h\x1b[?25l")
+    assert "\x1b[2J\x1b[H" in text
+    assert text.endswith("\x1b[?25h\x1b[?1049l")
+
+
+def test_redirected_output_does_not_control_terminal():
+    out = io.StringIO()
+    painter = _TerminalQrPainter(out)
+    painter.render("Waiting")
+    painter.render("Refreshed")
+    painter.close()
+    assert "\x1b" not in out.getvalue()
+
+
+def test_failed_qr_hook_is_actionable_not_silent(monkeypatch):
+    driver = AgentBrowserDriver(binary="fake")
+    monkeypatch.setattr(driver, "_eval_json", lambda script: {"token": None, "error": "PRIVATE_TOKEN"})
+    times = iter([0.0, 16.0])
+    monkeypatch.setattr("qa_cli.browser.time.monotonic", lambda: next(times))
+    assert driver.get_qr_token() is None
+    with pytest.raises(BrowserError, match="capture is unavailable") as error:
+        driver.get_qr_token()
+    assert "PRIVATE" not in str(error.value)
+
+
+def test_transient_qr_hook_failure_recovers(monkeypatch):
+    driver = AgentBrowserDriver(binary="fake")
+    values = iter([{"token": None}, {"error": "loading"}, {"token": None}, {"token": "SYNTHETIC"}])
+    monkeypatch.setattr(driver, "_eval_json", lambda script: next(values))
+    assert driver.get_qr_token() is None
+    assert driver.get_qr_token() == "SYNTHETIC"
+    assert driver._qr_failure_since is None
+
+
+def test_hidden_shell_does_not_authenticate():
+    script = """global.getComputedStyle=()=>({visibility:'hidden',opacity:'1',display:'block'});
+    const shell={getClientRects:()=>[1]};
+    global.document={querySelector:(s)=>s.includes('#Main')?shell:null,querySelectorAll:()=>[]};
+    console.log(""" + _AUTH_STATUS_JS + ")"
+    assert json.loads(subprocess.check_output(["node","-e",script],text=True))["loggedIn"] is False
+
+
+def test_unsupported_decoder_is_cached(monkeypatch):
+    driver=AgentBrowserDriver(binary="fake")
+    seen=[]
+    def evaluate(script):
+        seen.append(script)
+        return {"supported":False,"token":None} if "BarcodeDetector" in script else {"token":None}
+    monkeypatch.setattr(driver,"_eval_json",evaluate)
+    driver.get_qr_token(); driver.get_qr_token()
+    assert sum("BarcodeDetector" in x for x in seen)==1
+
+
+def test_browser_nonzero_error_never_discloses_payload(monkeypatch):
+    monkeypatch.setattr(subprocess,"run",lambda argv,**kw:subprocess.CompletedProcess(argv,1,"PRIVATE_RESPONSE","PRIVATE_ERROR"))
+    with pytest.raises(BrowserError) as error: AgentBrowserDriver(binary="fake")._run("eval","PRIVATE_JS")
+    assert "PRIVATE" not in str(error.value)
+
+
+def test_invalid_hook_token_is_not_rendered(monkeypatch):
+    driver=AgentBrowserDriver(binary="fake")
+    monkeypatch.setattr(driver,"_eval_json",lambda script:{"token":"secret\n<script>"})
+    assert driver.get_qr_token() is None
+
+
+def test_transient_auth_form_can_reach_logged_in(tmp_path,monkeypatch):
+    from qa_cli.browser import AuthStatus
+    from qa_cli.telegram import login
+    monkeypatch.setenv("QA_CONFIG_DIR",str(tmp_path))
+    class Browser:
+        def open(self,url): pass
+        def is_logged_in(self): return False
+        def wait_for_qr(self,timeout): pass
+        def auth_status(self): return next(self.states)
+        states=iter([AuthStatus(False,"auth-phone-number-form"),AuthStatus(True,None)])
+    out=io.StringIO()
+    assert login(Browser(),poll_interval=0,out=out)==0
+    assert "logged-in" in out.getvalue()
+
+
+def test_persistent_manual_step_returns_code_three(tmp_path,monkeypatch):
+    from qa_cli.browser import AuthStatus
+    from qa_cli.cli import main
+    monkeypatch.setenv("QA_CONFIG_DIR",str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep",lambda _:None)
+    class Browser:
+        def open(self,url): pass
+        def is_logged_in(self): return False
+        def wait_for_qr(self,timeout): pass
+        def auth_status(self): return AuthStatus(False,"auth-password-form")
+    assert main(["telegram","login"],browser=Browser())==3
+
+
+def test_qr_file_is_private(tmp_path,monkeypatch):
+    from qa_cli.browser import AuthStatus
+    from qa_cli.telegram import login
+    monkeypatch.setenv("QA_CONFIG_DIR",str(tmp_path))
+    class Browser:
+        def open(self,url): pass
+        def is_logged_in(self): return False
+        def wait_for_qr(self,timeout): pass
+        def auth_status(self): return next(self.states)
+        def get_qr_token(self): return "SYNTHETIC"
+        def screenshot(self,path): Path(path).write_bytes(b"SYNTHETIC_NOT_IMAGE")
+        states=iter([AuthStatus(False,"auth-qr-form"),AuthStatus(True,None)])
+    assert login(Browser(),poll_interval=0,out=io.StringIO())==0
+    assert (tmp_path/"telegram-qr.png").stat().st_mode & 0o777 == 0o600
+
+
+def test_qr_cache_uses_the_frame_that_was_actually_decoded():
+    from qa_cli.browser import _QR_IMAGE_TOKEN_JS
+    harness = r"""
+const svg={markup:'old-frame'};
+global.window={}; global.Blob=class {};
+global.URL={createObjectURL:()=>"blob:test",revokeObjectURL:()=>{}};
+global.XMLSerializer=class{serializeToString(node){return node.markup;}};
+global.Image=class{constructor(){this.width=280;this.height=280;} async decode(){svg.markup='new-frame';}};
+global.BarcodeDetector=class{static async getSupportedFormats(){return ['qr_code'];} async detect(){return [{rawValue:'tg://login?token=SYNTHETIC_OLD'}];}};
+global.document={querySelector:(selector)=>selector==='.qr-container svg'?svg:null,createElement:()=>({getContext:()=>({drawImage:()=>{}})})};
+"""
+    script=harness+"Promise.resolve("+_QR_IMAGE_TOKEN_JS+").then(()=>console.log(JSON.stringify(window.__qaQrImageCache)))"
+    result=json.loads(subprocess.check_output(["node","-e",script],text=True))
+    assert result=={"markup":"old-frame","token":"SYNTHETIC_OLD"}

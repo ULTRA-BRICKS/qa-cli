@@ -15,6 +15,7 @@ from typing import Optional, Sequence
 from qa_cli import __version__
 from qa_cli.browser import (
     AgentBrowserDriver,
+    AuthStepRequiredError,
     BrowserDriver,
     BrowserError,
     BrowserMissingError,
@@ -127,6 +128,12 @@ def main(
         print(f"error: {exc}", file=sys.stderr)
         print("scan the QR with your phone and re-run: qa telegram login", file=sys.stderr)
         return 1
+    except AuthStepRequiredError as exc:
+        print(f"action required: {exc}", file=sys.stderr)
+        return 3
+    except KeyboardInterrupt:
+        print("login cancelled", file=sys.stderr)
+        return 130
     except BrowserError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

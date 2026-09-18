@@ -31,3 +31,17 @@ uv run --no-project --with 'pytest>=8,<9' --with qrcode pytest tests -q
 Install from the current checkout with `pipx install --force .` (or `./install.sh`).
 The maintained repository is on Forgejo under `ultrabricks/qa-cli`; the old
 GitHub repository is archived. This package does not send chat messages by default.
+
+## Deployment transport proof
+
+```sh
+qa telegram bot-probe --base-url https://your-bot.example --expected-sha <40-character-sha>
+```
+
+This token-free command verifies `/healthz`, the exact release SHA and that an
+unsigned `/webhook` request is rejected. The request contains only `update_id: 0`,
+no message, chat ID or command. Redirects are not followed, responses are bounded,
+and server error bodies are never copied into the JSON report. Exit 0 means these
+transport checks passed; exit 1 means failure; exit 2 means invalid arguments.
+The report explicitly says `authenticated_chat_qa: not_run`. It does not claim
+login, summary quality, message delivery, database readiness or history coverage.

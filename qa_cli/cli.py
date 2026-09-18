@@ -74,6 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Uses the persisted agent-browser session qa-telegram."
         ),
     )
+    probe = tg_sub.add_parser(
+        "bot-probe", help="Verify deployed SHA and unsigned-webhook rejection; no chat access",
+    )
+    probe.add_argument("--base-url", required=True, help="HTTPS origin, without path or credentials")
+    probe.add_argument("--expected-sha", required=True, help="Exact deployed 40-character commit SHA")
     return parser
 
 
@@ -101,6 +106,10 @@ def main(
     if args.command != "telegram":
         parser.print_usage(sys.stderr)
         return 2
+
+    if args.telegram_command == "bot-probe":
+        from qa_cli.transport_probe import run_bot_probe
+        return run_bot_probe(args.base_url, args.expected_sha)
 
     from qa_cli.telegram import login, status
 

@@ -24,6 +24,7 @@ file directly.
 from __future__ import annotations
 
 import getpass
+import warnings
 import io
 import os
 import sys
@@ -44,6 +45,8 @@ from qa_cli.browser import (
     BrowserDriver,
 )
 
+from qa_cli.auth_input import CODE_FORM, PHONE_FORM
+
 DEFAULT_LOGIN_TIMEOUT = 300.0
 DEFAULT_QR_WAIT_TIMEOUT = 60.0
 DEFAULT_POLL_INTERVAL = 1.0
@@ -58,6 +61,8 @@ _MANUAL_STEP_FALLBACK = "finish this step manually in a headed browser session, 
 # genuinely wrong password (or a submission that silently failed) is still
 # reported within a few seconds, never retried silently forever.
 _PASSWORD_CONFIRM_POLLS = 5
+_FIELD_CONFIRM_POLLS = 15
+_FIELD_CONFIRM_INTERVAL = 1.0
 
 
 def config_dir() -> Path:
@@ -117,6 +122,18 @@ class _TerminalQrPainter:
         self._drawn = True
 
 
+def _interactive_input_available():
+    return bool(getattr(sys.stdin, 'isatty', lambda: False)())
+
+
+def _secure_getpass(prompt):
+    if not _interactive_input_available():
+        raise AuthStepRequiredError('Interactive terminal required for auth-code-form/auth-password-form; re-run qa telegram login in a terminal')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', getpass.GetPassWarning)
+        return getpass.getpass(prompt)
+
+
 def _prompt_and_submit_password(browser: BrowserDriver, painter: _TerminalQrPainter) -> None:
     """Prompt for Telegram's cloud password in the terminal (masked) and
     submit it into the live page.
@@ -131,8 +148,8 @@ def _prompt_and_submit_password(browser: BrowserDriver, painter: _TerminalQrPain
         "check this terminal for a masked password prompt."
     )
     try:
-        password = getpass.getpass("Telegram cloud password (input hidden): ")
-    except (EOFError, OSError) as exc:
+        password = _secure_getpass("Telegram cloud password (input hidden): ")
+    except (EOFError, OSError, getpass.GetPassWarning) as exc:
         raise AuthStepRequiredError(
             "Telegram requires the two-factor cloud password, but this "
             "terminal has no interactive input to prompt for it; re-run "
@@ -160,6 +177,27 @@ def _confirm_password_step(browser: BrowserDriver, poll_interval: float) -> Auth
     raise AuthPasswordRejectedError(
         "Telegram rejected the password (or another step is required); re-run to try again"
     )
+
+def _prompt_terminal_field(browser, painter, form, poll_interval=DEFAULT_POLL_INTERVAL):
+    kind = 'code' if form == CODE_FORM else 'phone'
+    prompt = 'Telegram verification code (5 digits, input hidden): ' if kind == 'code' else 'Telegram phone (+country code, input hidden): '
+    painter.render('Enter the requested login value in this terminal; it is not logged.')
+    try:
+        value = _secure_getpass(prompt)
+    except (EOFError, OSError, getpass.GetPassWarning):
+        raise AuthStepRequiredError('Secure interactive terminal input is unavailable; re-run qa telegram login in a terminal') from None
+    if browser.auth_status().waiting_form != form:
+        raise AuthStepRequiredError('Telegram authentication step changed; no value submitted. Re-run login.')
+    if kind == 'code':
+        browser.submit_code(value.strip())
+    else:
+        browser.submit_phone(value.strip())
+    for _ in range(_FIELD_CONFIRM_POLLS):
+        time.sleep(min(_FIELD_CONFIRM_INTERVAL, max(0, poll_interval)))
+        status = browser.auth_status()
+        if status.waiting_form != form:
+            return status
+    raise AuthStepRequiredError('Telegram has not accepted this login step. Check the code/phone and retry; no automatic resubmission.')
 
 def _run_qr_login_loop(
     browser: BrowserDriver,
@@ -209,6 +247,11 @@ def _run_qr_login_loop(
                 manual_polls = manual_polls + 1 if manual_form == status.waiting_form else 1
                 manual_form = status.waiting_form
                 if manual_polls >= 2:
+                    if status.waiting_form in (CODE_FORM, PHONE_FORM):
+                        status = _prompt_terminal_field(browser, painter, status.waiting_form, poll_interval)
+                        manual_form = None
+                        manual_polls = 0
+                        continue
                     if status.waiting_form != AUTH_PASSWORD_FORM_ID:
                         raise AuthStepRequiredError(_describe_wait(status.waiting_form))
                     _prompt_and_submit_password(browser, painter)
@@ -229,6 +272,7 @@ def login(
     qr_timeout: float = DEFAULT_QR_WAIT_TIMEOUT,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     out=None,
+    phone: bool = False,
 ) -> int:
     directory = config_dir()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -241,6 +285,8 @@ def login(
         browser.open(TELEGRAM_WEB_URL)
         if not browser.is_logged_in():
             browser.wait_for_qr(qr_timeout)
+            if phone and browser.auth_status().waiting_form == AUTH_QR_FORM_ID:
+                browser.switch_to_phone()
             if not browser.is_logged_in():
                 _run_qr_login_loop(
                     browser, timeout, poll_interval, out if out is not None else sys.stdout

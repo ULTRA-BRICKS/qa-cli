@@ -171,32 +171,6 @@ _DIAGNOSTIC_JS = """JSON.stringify({
 # any password input inside the form, and reports a distinct failure
 # reason (never page content or the password) if the form or input is
 # missing instead of silently doing nothing.
-_SUBMIT_PASSWORD_JS = r"""(async () => {
-  const container = document.getElementById('auth-password-form');
-  if (!container) return JSON.stringify({ok: false, reason: 'form-not-found'});
-  const input = container.querySelector('#sign-in-password') || container.querySelector('input[type="password"]');
-  if (!input) return JSON.stringify({ok: false, reason: 'input-not-found'});
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-  setter.call(input, __QA_PASSWORD_JSON__);
-  input.dispatchEvent(new Event('input', {bubbles: true}));
-  input.dispatchEvent(new Event('change', {bubbles: true}));
-  const form = input.closest('form') || container;
-  let submitEl = null;
-  for (let i = 0; i < 20; i++) {
-    submitEl = form.querySelector('button[type="submit"]');
-    if (submitEl) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  if (submitEl) {
-    submitEl.click();
-  } else if (typeof form.requestSubmit === 'function') {
-    form.requestSubmit();
-  } else {
-    form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
-  }
-  return JSON.stringify({ok: true});
-})()"""
-
 # Side-effect free: painted QR canvas, QR <img>, or QR-related <svg>.
 # Telegram sizes a canvas before drawing; dimensions alone are not ready.
 # Live Web A currently paints the login QR as SVG inside .qr-container.
@@ -308,6 +282,9 @@ class BrowserDriver(Protocol):
     def get_qr_token(self) -> Optional[str]: ...
     def diagnostic_dump(self) -> str: ...
     def submit_password(self, password: str) -> None: ...
+    def submit_code(self, code: str) -> None: ...
+    def submit_phone(self, phone: str) -> None: ...
+    def switch_to_phone(self) -> None: ...
 
 
 def browser_bin() -> str:
@@ -316,19 +293,6 @@ def browser_bin() -> str:
 
 def _coerce_token(value) -> Optional[str]:
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", value) else None
-
-
-def _password_submit_script(password: str) -> str:
-    """Build `_SUBMIT_PASSWORD_JS` with `password` safely embedded as a JS
-    string literal. Fails loudly here, in Python, if the template's
-    placeholder is missing (a future edit dropped or renamed it) -- a plain
-    `assert` would vanish under `python -O`, silently sending the literal
-    placeholder text to `agent-browser eval` as an undefined JS identifier.
-    """
-    placeholder = "__QA_PASSWORD_JSON__"
-    if placeholder not in _SUBMIT_PASSWORD_JS:
-        raise RuntimeError("submit-password JS template lost its placeholder")
-    return _SUBMIT_PASSWORD_JS.replace(placeholder, json.dumps(password))
 
 
 class AgentBrowserDriver:
@@ -487,24 +451,38 @@ class AgentBrowserDriver:
             f"ready={data.get('ready', 'unknown')!r} form={data.get('authForm')!r}"
         )
 
+    def _auth_batch(self, commands) -> None:
+        proc = self._run_stdin('batch', '--bail', '--json', input_text=json.dumps(commands))
+        try:
+            results = json.loads(proc.stdout)
+        except (ValueError, TypeError):
+            raise BrowserError('Telegram auth command returned an unreadable response') from None
+        if not isinstance(results, list) or len(results) != len(commands) or any(
+            not isinstance(item, dict) or item.get('success') is not True for item in results
+        ):
+            raise BrowserError('Telegram auth input was not accepted; no secret included in diagnostics')
+
+    def _submit_terminal_field(self, kind, value) -> None:
+        """Secrets stay in stdin/memory; never argv, file logs or raw errors."""
+        from qa_cli.auth_input import submission_commands
+        try:
+            commands = submission_commands(kind, value)
+        except ValueError as error:
+            raise AuthStepRequiredError(str(error)) from None
+        self._auth_batch(commands)
+
+    def submit_code(self, code: str) -> None:
+        self._submit_terminal_field('code', code)
+
+    def submit_phone(self, phone: str) -> None:
+        self._submit_terminal_field('phone', phone)
+
     def submit_password(self, password: str) -> None:
-        """Type `password` into Telegram's live #auth-password-form and
-        submit it. `password` is sent to `agent-browser eval --stdin` via
-        subprocess stdin (see `_run_stdin`) -- never as an argv element,
-        never logged, never written anywhere. Only call this while
-        `auth_status().waiting_form == AUTH_PASSWORD_FORM_ID`.
-        """
-        js = _password_submit_script(password)
-        result = self._eval_json_stdin(js)
-        if isinstance(result, dict) and result.get("ok") is True:
-            return
-        if isinstance(result, dict):
-            raise BrowserError(
-                f"could not submit the Telegram password (page selector mismatch: {result.get('reason', 'unknown')})"
-            )
-        raise BrowserError(
-            "could not submit the Telegram password (agent-browser returned an unreadable response)"
-        )
+        self._submit_terminal_field('password', password)
+
+    def switch_to_phone(self) -> None:
+        from qa_cli.auth_input import phone_login_commands
+        self._auth_batch(phone_login_commands())
 
     def is_qr_visible(self) -> bool:
         proc = self._run("eval", _QR_VISIBLE_JS)

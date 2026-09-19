@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from qa_cli.browser import AgentBrowserDriver, BrowserError, _AUTH_STATUS_JS, _password_submit_script
+from qa_cli.browser import AgentBrowserDriver, BrowserError, _AUTH_STATUS_JS
 from qa_cli.telegram import _TerminalQrPainter
 
 def test_blank_page_is_not_authenticated():
@@ -156,6 +156,7 @@ def test_password_step_prompts_masked_and_submits_to_page(tmp_path, monkeypatch)
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _: None)
     monkeypatch.setattr("qa_cli.telegram.getpass.getpass", lambda *a, **k: "s3cret-test-only")
+    monkeypatch.setattr("qa_cli.telegram._interactive_input_available", lambda: True)
     submitted = []
     class Browser:
         def open(self, url): pass
@@ -182,7 +183,7 @@ def test_submit_password_sends_via_stdin_never_argv(monkeypatch):
     calls = []
     def fake_run(argv, **kwargs):
         calls.append((list(argv), kwargs))
-        return subprocess.CompletedProcess(argv, 0, json.dumps(json.dumps({"ok": True})), "")
+        return subprocess.CompletedProcess(argv, 0, json.dumps([{"success":True}] * 4), "")
     monkeypatch.setattr(subprocess, "run", fake_run)
     driver.submit_password("PRIVATE_TEST_PASSWORD_XYZ")
     assert len(calls) == 1
@@ -191,113 +192,12 @@ def test_submit_password_sends_via_stdin_never_argv(monkeypatch):
     # (visible to other local processes via ps/proc); it only travels via
     # the subprocess `input=` kwarg (stdin).
     assert not any("PRIVATE_TEST_PASSWORD_XYZ" in part for part in argv)
-    assert "eval" in argv and "--stdin" in argv
+    assert "batch" in argv and "--bail" in argv
     assert kwargs.get("input") is not None
     assert "PRIVATE_TEST_PASSWORD_XYZ" in kwargs["input"]
 
 
 # --- _SUBMIT_PASSWORD_JS (stubs Node's DOM; no Chromium) -------------------
-
-_PASSWORD_FORM_HARNESS_PRELUDE = r"""
-global.window = { HTMLInputElement: { prototype: {} } };
-Object.defineProperty(window.HTMLInputElement.prototype, 'value', {
-  set(v) { this._value = v; },
-  get() { return this._value; },
-});
-function makeInput() {
-  return {
-    _value: '',
-    addEventListener() {},
-    dispatchEvent() { return true; },
-    closest(sel) { return sel === 'form' ? form : null; },
-  };
-}
-"""
-
-
-def test_submit_password_js_sets_value_and_clicks_submit_when_ready():
-    harness = _PASSWORD_FORM_HARNESS_PRELUDE + r"""
-const input = makeInput();
-let submitCalls = 0;
-const submitBtn = { clicked: false, click() { this.clicked = true; } };
-const form = {
-  querySelector(sel) { return sel === 'button[type="submit"]' ? submitBtn : null; },
-  requestSubmit() { submitCalls++; },
-  dispatchEvent() { submitCalls++; return true; },
-};
-const container = {
-  querySelector(sel) { return sel === '#sign-in-password' ? input : null; },
-};
-global.document = { getElementById(id) { return id === 'auth-password-form' ? container : null; } };
-"""
-    js = _password_submit_script("hunter2-test-only")
-    script = harness + (
-        f"({js}).then((result) => console.log(JSON.stringify("
-        "{result, inputValue: input._value, clicked: submitBtn.clicked, submitCalls})))"
-    )
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
-    assert json.loads(out["result"]) == {"ok": True}
-    # The native value setter fired (framework-visible), the real submit
-    # button was used, and the requestSubmit/dispatchEvent fallbacks did NOT
-    # also fire (only one submission path taken).
-    assert out["inputValue"] == "hunter2-test-only"
-    assert out["clicked"] is True
-    assert out["submitCalls"] == 0
-
-
-def test_submit_password_js_falls_back_to_request_submit_when_no_button_mounts():
-    # canSubmit never flips true (e.g. Telegram's own min-length gate) -- the
-    # submit button never mounts, so the script must still trigger a real
-    # submission instead of silently doing nothing.
-    harness = _PASSWORD_FORM_HARNESS_PRELUDE + r"""
-const input = makeInput();
-let requestSubmitCalled = false;
-const form = {
-  querySelector() { return null; },
-  requestSubmit() { requestSubmitCalled = true; },
-  dispatchEvent() { return true; },
-};
-const container = { querySelector(sel) { return sel === '#sign-in-password' ? input : null; } };
-global.document = { getElementById(id) { return id === 'auth-password-form' ? container : null; } };
-"""
-    js = _password_submit_script("no-button-pw")
-    script = harness + f"({js}).then((result) => console.log(JSON.stringify({{result, requestSubmitCalled}})))"
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
-    assert json.loads(out["result"]) == {"ok": True}
-    assert out["requestSubmitCalled"] is True
-
-
-def test_submit_password_js_reports_missing_form_or_input_distinctly():
-    js = _password_submit_script("irrelevant")
-    no_form = "global.window={HTMLInputElement:{prototype:{}}};global.document={getElementById(){return null;}};"
-    result = json.loads(subprocess.check_output(["node", "-e", no_form + f"({js}).then((r)=>console.log(r))"], text=True))
-    assert result == {"ok": False, "reason": "form-not-found"}
-
-    no_input = (
-        "global.window={HTMLInputElement:{prototype:{}}};"
-        "const container={querySelector(){return null;}};"
-        "global.document={getElementById(id){return id==='auth-password-form'?container:null;}};"
-    )
-    result = json.loads(subprocess.check_output(["node", "-e", no_input + f"({js}).then((r)=>console.log(r))"], text=True))
-    assert result == {"ok": False, "reason": "input-not-found"}
-
-
-def test_submit_password_failure_reason_is_reported_not_swallowed(monkeypatch):
-    driver = AgentBrowserDriver(binary="fake")
-    monkeypatch.setattr(driver, "_eval_json_stdin", lambda js: {"ok": False, "reason": "input-not-found"})
-    with pytest.raises(BrowserError, match="input-not-found"):
-        driver.submit_password("irrelevant")
-
-
-def test_submit_password_undecodable_response_is_a_distinct_error(monkeypatch):
-    # agent-browser exited 0 but the stdout could not be decoded as JSON --
-    # a transport/CLI-shape problem, not a DOM selector mismatch; the two
-    # must not be conflated in the error message.
-    driver = AgentBrowserDriver(binary="fake")
-    monkeypatch.setattr(driver, "_eval_json_stdin", lambda js: None)
-    with pytest.raises(BrowserError, match="unreadable response"):
-        driver.submit_password("irrelevant")
-
 
 def test_password_step_survives_a_slow_correct_password_without_false_rejection(tmp_path, monkeypatch):
     # Telegram's own password check is a network round trip: the form can
@@ -309,6 +209,7 @@ def test_password_step_survives_a_slow_correct_password_without_false_rejection(
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _: None)
     monkeypatch.setattr("qa_cli.telegram.getpass.getpass", lambda *a, **k: "correct-but-slow")
+    monkeypatch.setattr("qa_cli.telegram._interactive_input_available", lambda: True)
     class Browser:
         def open(self, url): pass
         def is_logged_in(self): return False
@@ -333,6 +234,7 @@ def test_password_step_rejected_reports_clear_error_and_exits_nonzero(tmp_path, 
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _: None)
     monkeypatch.setattr("qa_cli.telegram.getpass.getpass", lambda *a, **k: "wrong-password")
+    monkeypatch.setattr("qa_cli.telegram._interactive_input_available", lambda: True)
     class Browser:
         def open(self, url): pass
         def is_logged_in(self): return False
@@ -354,6 +256,7 @@ def test_password_step_no_tty_fails_clearly_instead_of_hanging(tmp_path, monkeyp
     def raise_eof(*_a, **_k):
         raise EOFError()
     monkeypatch.setattr("qa_cli.telegram.getpass.getpass", raise_eof)
+    monkeypatch.setattr("qa_cli.telegram._interactive_input_available", lambda: True)
     class Browser:
         def open(self, url): pass
         def is_logged_in(self): return False

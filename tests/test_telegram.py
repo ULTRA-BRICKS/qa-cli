@@ -738,17 +738,17 @@ def test_login_redraws_terminal_qr_on_token_rotation(
 def test_login_reports_unsupported_auth_step_distinctly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Only auth-password-form is auto-handled (terminal password entry);
+    # Code, phone and password forms are now handled in the terminal;
     # every other auth step this CLI can't automate must still escalate
     # exactly as before.
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
     fake = FakeBrowserDriver(
-        logged_in=False, waiting_form="auth-phone-number-form", become_logged_in_after=99
+        logged_in=False, waiting_form="auth-registration-form", become_logged_in_after=99  # gitleaks:allow -- synthetic DOM form id, not a credential
     )
     buf = io.StringIO()
     from qa_cli.browser import AuthStepRequiredError
-    with pytest.raises(AuthStepRequiredError, match="auth-phone-number-form"):
+    with pytest.raises(AuthStepRequiredError, match="auth-registration-form"):
         login(fake, out=buf)
     rendered = buf.getvalue()
     assert not any(c[0] == "screenshot" for c in fake.calls)

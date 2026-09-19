@@ -8,8 +8,10 @@ headless Chromium is agent-browser's default (no --headed); session name
 qa-telegram with --restore so re-runs skip QR. QR-ready means a painted
 QR-related canvas (non-uniform opaque pixels), a QR-labeled img, or a
 QR-related svg (>= 80px) — a blank or unrelated canvas is not ready.
-wait_for_qr also returns if a restored
-session becomes logged-in, so re-runs do not wait for a QR that never appears.
+wait_for_qr also returns if a restored session becomes logged-in, or if any
+OTHER auth form (e.g. a resumed session parked on auth-password-form) is
+already mounted, so a re-run never dead-ends waiting for QR pixels that
+will never appear.
 
 Telegram Web A uses lazily loaded UI modules. Before login it renders
 #auth-<step>-form inside .is-auth; after login the main module mounts #Main
@@ -36,6 +38,12 @@ from typing import NamedTuple, Optional, Protocol
 TELEGRAM_WEB_URL = "https://web.telegram.org/a/"
 SESSION_NAME = "qa-telegram"
 INSTALL_HINT = "npm i -g agent-browser && agent-browser install"
+# The `#auth-<step>-form` DOM ids this driver treats specially. Every OTHER
+# waiting_form value is an unsupported step this qa-cli flow escalates
+# instead of automating. Defined once so a typo in a comparison fails an
+# import-time NameError instead of silently mismatching a string literal.
+AUTH_QR_FORM_ID = "auth-qr-form"
+AUTH_PASSWORD_FORM_ID = "auth-password-form"
 _SUBPROCESS_TIMEOUT_SECONDS = 10.0
 _NAVIGATION_TIMEOUT_SECONDS = 45.0
 _QR_CAPTURE_GRACE_SECONDS = 15.0
@@ -153,6 +161,16 @@ _DIAGNOSTIC_JS = """JSON.stringify({
   authForm: (document.querySelector('[id^="auth-"][id$="-form"]') || {}).id || null
 })"""
 
+# Called only while auth_status().waiting_form == "auth-password-form". Sets
+# Telegram's live #sign-in-password input via the native value setter (so
+# the framework's change listener fires exactly as it would for real
+# typing), then submits the form. `__QA_PASSWORD_JSON__` is a placeholder,
+# string-replaced with a json.dumps(...) literal by submit_password() just
+# before sending -- it is a valid, escaped JS string literal, never a raw
+# string interpolation. Defensive: falls back from the known input id to
+# any password input inside the form, and reports a distinct failure
+# reason (never page content or the password) if the form or input is
+# missing instead of silently doing nothing.
 # Side-effect free: painted QR canvas, QR <img>, or QR-related <svg>.
 # Telegram sizes a canvas before drawing; dimensions alone are not ready.
 # Live Web A currently paints the login QR as SVG inside .qr-container.
@@ -241,6 +259,11 @@ class AuthStepRequiredError(BrowserError):
     """A password or other manual auth step is required; do not keep polling QR."""
 
 
+class AuthPasswordRejectedError(BrowserError):
+    """The submitted cloud password was rejected (or Telegram now wants
+    yet another step); do not keep retrying automatically."""
+
+
 class BrowserMissingError(FileNotFoundError):
     """Raised when the agent-browser binary is not on PATH."""
 
@@ -258,6 +281,10 @@ class BrowserDriver(Protocol):
     def auth_status(self) -> AuthStatus: ...
     def get_qr_token(self) -> Optional[str]: ...
     def diagnostic_dump(self) -> str: ...
+    def submit_password(self, password: str) -> None: ...
+    def submit_code(self, code: str) -> None: ...
+    def submit_phone(self, phone: str) -> None: ...
+    def switch_to_phone(self) -> None: ...
 
 
 def browser_bin() -> str:
@@ -289,16 +316,21 @@ class AgentBrowserDriver:
             *args,
         ]
 
-    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
-        argv = self.build_argv(*args)
-        timeout = _NAVIGATION_TIMEOUT_SECONDS if args and args[0] == "open" else _SUBPROCESS_TIMEOUT_SECONDS
-        if self._deadline is not None:
-            remaining = self._deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Telegram login deadline exceeded")
-            timeout = min(timeout, remaining)
+    def _resolve_timeout(self, base: float) -> float:
+        if self._deadline is None:
+            return base
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Telegram login deadline exceeded")
+        return min(base, remaining)
+
+    def _invoke(
+        self, argv: list[str], timeout: float, input_text: Optional[str] = None
+    ) -> subprocess.CompletedProcess[str]:
         try:
-            proc = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=timeout)
+            proc = subprocess.run(
+                argv, input=input_text, check=False, capture_output=True, text=True, timeout=timeout
+            )
         except subprocess.TimeoutExpired:
             raise BrowserError(f"agent-browser command timed out after {timeout:g}s") from None
         except FileNotFoundError as exc:
@@ -313,6 +345,24 @@ class AgentBrowserDriver:
             raise BrowserError(f"agent-browser {category} (exit {proc.returncode}); inspect locally, no page data logged")
         return proc
 
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        argv = self.build_argv(*args)
+        base_timeout = _NAVIGATION_TIMEOUT_SECONDS if args and args[0] == "open" else _SUBPROCESS_TIMEOUT_SECONDS
+        timeout = self._resolve_timeout(base_timeout)
+        return self._invoke(argv, timeout)
+
+    def _run_stdin(self, *args: str, input_text: str) -> subprocess.CompletedProcess[str]:
+        """Like `_run`, but pipes `input_text` to the agent-browser
+        subprocess's stdin instead of appending it to argv, so a live
+        secret (e.g. a typed 2FA password) never appears in argv -- visible
+        to any other local process via `ps`/`/proc`. `_invoke`'s error
+        categorization only ever inspects stderr/stdout phrasing, never
+        `input_text`, so a failure here cannot leak the secret either.
+        """
+        argv = self.build_argv(*args)
+        timeout = self._resolve_timeout(_SUBPROCESS_TIMEOUT_SECONDS)
+        return self._invoke(argv, timeout, input_text=input_text)
+
     def set_deadline(self, deadline: Optional[float]) -> None:
         self._deadline = deadline
 
@@ -324,15 +374,14 @@ class AgentBrowserDriver:
     def screenshot(self, path: str) -> None:
         self._run("screenshot", path)
 
-    def _eval_json(self, js: str):
-        """Run `js` and decode agent-browser's JSON.stringify(...) return value.
+    @staticmethod
+    def _decode_eval_result(raw: str):
+        """Decode agent-browser's JSON.stringify(...) return value.
 
         agent-browser prints a JS string return value JSON-encoded, so a
         `JSON.stringify(...)` payload arrives double-encoded (once from
         agent-browser's own quoting, once from our script).
         """
-        proc = self._run("eval", js)
-        raw = (proc.stdout or "").strip()
         try:
             outer = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
@@ -343,6 +392,17 @@ class AgentBrowserDriver:
             return json.loads(outer)
         except (json.JSONDecodeError, ValueError):
             return None
+
+    def _eval_json(self, js: str):
+        """Run `js` (passed via argv) and decode its return value."""
+        proc = self._run("eval", js)
+        return self._decode_eval_result((proc.stdout or "").strip())
+
+    def _eval_json_stdin(self, js: str):
+        """Run `js` (piped via stdin, see `_run_stdin`) and decode its
+        return value. Use for any JS that embeds a live secret."""
+        proc = self._run_stdin("eval", "--stdin", input_text=js)
+        return self._decode_eval_result((proc.stdout or "").strip())
 
     def auth_status(self) -> AuthStatus:
         data = self._eval_json(_AUTH_STATUS_JS)
@@ -391,6 +451,39 @@ class AgentBrowserDriver:
             f"ready={data.get('ready', 'unknown')!r} form={data.get('authForm')!r}"
         )
 
+    def _auth_batch(self, commands) -> None:
+        proc = self._run_stdin('batch', '--bail', '--json', input_text=json.dumps(commands))
+        try:
+            results = json.loads(proc.stdout)
+        except (ValueError, TypeError):
+            raise BrowserError('Telegram auth command returned an unreadable response') from None
+        if not isinstance(results, list) or len(results) != len(commands) or any(
+            not isinstance(item, dict) or item.get('success') is not True for item in results
+        ):
+            raise BrowserError('Telegram auth input was not accepted; no secret included in diagnostics')
+
+    def _submit_terminal_field(self, kind, value) -> None:
+        """Secrets stay in stdin/memory; never argv, file logs or raw errors."""
+        from qa_cli.auth_input import submission_commands
+        try:
+            commands = submission_commands(kind, value)
+        except ValueError as error:
+            raise AuthStepRequiredError(str(error)) from None
+        self._auth_batch(commands)
+
+    def submit_code(self, code: str) -> None:
+        self._submit_terminal_field('code', code)
+
+    def submit_phone(self, phone: str) -> None:
+        self._submit_terminal_field('phone', phone)
+
+    def submit_password(self, password: str) -> None:
+        self._submit_terminal_field('password', password)
+
+    def switch_to_phone(self) -> None:
+        from qa_cli.auth_input import phone_login_commands
+        self._auth_batch(phone_login_commands())
+
     def is_qr_visible(self) -> bool:
         proc = self._run("eval", _QR_VISIBLE_JS)
         out = (proc.stdout or "").strip().strip('"').strip("'")
@@ -399,7 +492,17 @@ class AgentBrowserDriver:
     def wait_for_qr(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self.is_logged_in() or self.is_qr_visible():
+            status = self.auth_status()
+            # Any mounted auth form OTHER than the QR form (e.g. a persisted
+            # session resuming straight into auth-password-form) is just as
+            # "ready" as a visible QR: the caller's login loop reacts to it
+            # immediately. Waiting here for QR pixels specifically would
+            # dead-end for 60s on a page that will never show one.
+            if (
+                status.logged_in
+                or status.waiting_form not in (None, AUTH_QR_FORM_ID)
+                or self.is_qr_visible()
+            ):
                 return
             time.sleep(0.5)
         raise TimeoutError("timed out waiting for Telegram Web QR code")

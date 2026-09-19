@@ -4,8 +4,8 @@ title = "qa-cli gitleaks allowlist"
 useDefault = true
 
 [allowlist]
-description = "False positive: gitleaks' generic-api-key rule flags this exact test-fixture call as a key=value secret. It is a Telegram DOM element id (\"auth-password-form\") followed by an unrelated boolean-ish test kwarg (become_logged_in_after=1), not a credential. Anchored to the full, highly specific matched text (not just \"secret\") so this cannot mask an unrelated real secret elsewhere -- no `paths` entry on purpose, since gitleaks OR's `paths`/`regexes` on a global allowlist and a path scope would silently whitelist every other finding in that file too."
+description = "False positive: gitleaks' generic-api-key rule flags this exact test-fixture call as a key=value secret. It is a Telegram DOM element id followed by an unrelated boolean-ish test kwarg (become_logged_in_after=<n>), not a credential. Anchored to the full, highly specific matched text (not just \"secret\") so this cannot mask an unrelated real secret elsewhere -- no `paths` entry on purpose, since gitleaks OR's `paths`/`regexes` on a global allowlist and a path scope would silently whitelist every other finding in that file too."
 regexTarget = "match"
 regexes = [
-  '''^auth-password-form", become_logged_in_after=\d+$''',
+  '''^auth-phone-number-form", become_logged_in_after=\d+$''',
 ]

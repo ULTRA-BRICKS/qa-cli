@@ -205,6 +205,7 @@ class FakeBrowserDriver:
         self._qr_tokens = list(qr_tokens) if qr_tokens is not None else ["FAKE_QR_TOKEN"]
         self._become_logged_in_after = become_logged_in_after
         self._auth_status_calls = 0
+        self.submitted_passwords: list[str] = []
 
     def open(self, url: str) -> None:
         self.calls.append(("open", url))
@@ -243,6 +244,10 @@ class FakeBrowserDriver:
     def diagnostic_dump(self) -> str:
         self.calls.append(("diagnostic_dump",))
         return "title='Telegram' url='https://web.telegram.org/a/' text='Log in to Telegram by QR Code'"
+
+    def submit_password(self, password: str) -> None:
+        self.calls.append(("submit_password", password))
+        self.submitted_passwords.append(password)
 
     def wait_for_qr(self, timeout: float) -> None:
         self.calls.append(("wait_for_qr", timeout))
@@ -516,7 +521,7 @@ def test_wait_for_qr_detects_svg_after_delayed_render(monkeypatch: pytest.Monkey
         polls["n"] += 1
         return polls["n"] >= 3
 
-    monkeypatch.setattr(driver, "is_logged_in", lambda: False)
+    monkeypatch.setattr(driver, "auth_status", lambda: AuthStatus(logged_in=False, waiting_form=None))
     monkeypatch.setattr(driver, "is_qr_visible", fake_qr)
     monkeypatch.setattr("qa_cli.browser.time.sleep", lambda _s: None)
     driver.wait_for_qr(60.0)
@@ -563,12 +568,31 @@ def test_wait_for_qr_returns_when_logged_in_without_qr(
     driver = AgentBrowserDriver(binary="unused")
     polls = {"n": 0}
 
-    def fake_logged_in() -> bool:
+    def fake_auth_status() -> AuthStatus:
         polls["n"] += 1
-        return polls["n"] >= 2
+        return AuthStatus(logged_in=polls["n"] >= 2, waiting_form=None)
 
-    monkeypatch.setattr(driver, "is_logged_in", fake_logged_in)
+    monkeypatch.setattr(driver, "auth_status", fake_auth_status)
     monkeypatch.setattr(driver, "is_qr_visible", lambda: False)
+    monkeypatch.setattr("qa_cli.browser.time.sleep", lambda _s: None)
+    driver.wait_for_qr(5.0)
+
+
+def test_wait_for_qr_returns_immediately_on_non_qr_auth_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A persisted session resuming straight into auth-password-form (no QR
+    # ever rendered) must not dead-end waiting for QR pixels that will
+    # never appear (regression: previously hung the full timeout here).
+    driver = AgentBrowserDriver(binary="unused")
+
+    def fail_if_called() -> bool:
+        raise AssertionError("is_qr_visible should not be polled for a non-QR auth form")
+
+    monkeypatch.setattr(
+        driver, "auth_status", lambda: AuthStatus(logged_in=False, waiting_form="auth-password-form")
+    )
+    monkeypatch.setattr(driver, "is_qr_visible", fail_if_called)
     monkeypatch.setattr("qa_cli.browser.time.sleep", lambda _s: None)
     driver.wait_for_qr(5.0)
 
@@ -714,14 +738,18 @@ def test_login_redraws_terminal_qr_on_token_rotation(
 def test_login_reports_unsupported_auth_step_distinctly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Code, phone and password forms are now handled in the terminal;
+    # every other auth step this CLI can't automate must still escalate
+    # exactly as before.
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
     fake = FakeBrowserDriver(
-        logged_in=False, waiting_form="auth-password-form", become_logged_in_after=99
+        logged_in=False, waiting_form="auth-registration-form", become_logged_in_after=99  # gitleaks:allow -- synthetic DOM form id, not a credential
     )
     buf = io.StringIO()
     from qa_cli.browser import AuthStepRequiredError
-    with pytest.raises(AuthStepRequiredError, match="auth-password-form"):
+    with pytest.raises(AuthStepRequiredError, match="auth-registration-form"):
         login(fake, out=buf)
     rendered = buf.getvalue()
     assert not any(c[0] == "screenshot" for c in fake.calls)
+    assert not any(c[0] == "submit_password" for c in fake.calls)

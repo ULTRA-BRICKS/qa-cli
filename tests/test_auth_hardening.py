@@ -135,6 +135,9 @@ def test_transient_auth_form_can_reach_logged_in(tmp_path,monkeypatch):
 
 
 def test_persistent_manual_step_returns_code_three(tmp_path,monkeypatch):
+    # auth-password-form is now auto-handled (terminal password entry, see
+    # test_password_step_* below); any OTHER persistent manual step must
+    # still escalate to AuthStepRequiredError / exit 3 exactly as before.
     from qa_cli.browser import AuthStatus
     from qa_cli.cli import main
     monkeypatch.setenv("QA_CONFIG_DIR",str(tmp_path))
@@ -143,8 +146,126 @@ def test_persistent_manual_step_returns_code_three(tmp_path,monkeypatch):
         def open(self,url): pass
         def is_logged_in(self): return False
         def wait_for_qr(self,timeout): pass
-        def auth_status(self): return AuthStatus(False,"auth-password-form")
+        def auth_status(self): return AuthStatus(False,"auth-phone-number-form")
     assert main(["telegram","login"],browser=Browser())==3
+
+
+def test_password_step_prompts_masked_and_submits_to_page(tmp_path, monkeypatch):
+    from qa_cli.browser import AuthStatus
+    from qa_cli.telegram import login
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _: None)
+    monkeypatch.setattr("qa_cli.telegram.getpass.getpass", lambda *a, **k: "s3cret-test-only")
+    monkeypatch.setattr("qa_cli.telegram._interactive_input_available", lambda: True)
+    submitted = []
+    class Browser:
+        def open(self, url): pass
+        def is_logged_in(self): return False
+        def wait_for_qr(self, timeout): pass
+        def auth_status(self): return next(self.states)
+        def submit_password(self, password): submitted.append(password)
+        states = iter([
+            AuthStatus(False, "auth-password-form"),
+            AuthStatus(False, "auth-password-form"),  # 2nd poll -> debounce triggers the prompt
+            AuthStatus(True, None),  # cleared after submission
+        ])
+    out = io.StringIO()
+    assert login(Browser(), poll_interval=0, out=out) == 0
+    # The fake driver's submit_password is the ONLY place the password
+    # travels through; no other recorded interaction (or terminal output)
+    # ever sees it.
+    assert submitted == ["s3cret-test-only"]
+    assert "s3cret-test-only" not in out.getvalue()
+
+
+def test_submit_password_sends_via_stdin_never_argv(monkeypatch):
+    driver = AgentBrowserDriver(binary="fake")
+    calls = []
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(argv, 0, json.dumps([{"success":True}] * 4), "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    driver.submit_password("PRIVATE_TEST_PASSWORD_XYZ")
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    # Structural proof: the password is not a substring of any argv element
+    # (visible to other local processes via ps/proc); it only travels via
+    # the subprocess `input=` kwarg (stdin).
+    assert not any("PRIVATE_TEST_PASSWORD_XYZ" in part for part in argv)
+    assert "batch" in argv and "--bail" in argv
+    assert kwargs.get("input") is not None
+    assert "PRIVATE_TEST_PASSWORD_XYZ" in kwargs["input"]
+
+
+# --- _SUBMIT_PASSWORD_JS (stubs Node's DOM; no Chromium) -------------------
+
+def test_password_step_survives_a_slow_correct_password_without_false_rejection(tmp_path, monkeypatch):
+    # Telegram's own password check is a network round trip: the form can
+    # legitimately stay mounted for a couple of polls after a CORRECT
+    # password before it clears. A single immediate poll must not
+    # misreport this as a rejection.
+    from qa_cli.browser import AuthStatus
+    from qa_cli.telegram import login
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _: None)
+    monkeypatch.setattr("qa_cli.telegram.getpass.getpass", lambda *a, **k: "correct-but-slow")
+    monkeypatch.setattr("qa_cli.telegram._interactive_input_available", lambda: True)
+    class Browser:
+        def open(self, url): pass
+        def is_logged_in(self): return False
+        def wait_for_qr(self, timeout): pass
+        def submit_password(self, password): pass
+        def auth_status(self): return next(self.states)
+        states = iter([
+            AuthStatus(False, "auth-password-form"),
+            AuthStatus(False, "auth-password-form"),  # debounce poll #2 -> triggers the prompt
+            AuthStatus(False, "auth-password-form"),  # confirm poll #1: still validating server-side
+            AuthStatus(False, "auth-password-form"),  # confirm poll #2: still validating
+            AuthStatus(True, None),                    # confirm poll #3: cleared -- correct password
+        ])
+    out = io.StringIO()
+    assert login(Browser(), poll_interval=0, out=out) == 0
+    assert "logged-in" in out.getvalue()
+
+
+def test_password_step_rejected_reports_clear_error_and_exits_nonzero(tmp_path, monkeypatch, capsys):
+    from qa_cli.browser import AuthStatus
+    from qa_cli.cli import main
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _: None)
+    monkeypatch.setattr("qa_cli.telegram.getpass.getpass", lambda *a, **k: "wrong-password")
+    monkeypatch.setattr("qa_cli.telegram._interactive_input_available", lambda: True)
+    class Browser:
+        def open(self, url): pass
+        def is_logged_in(self): return False
+        def wait_for_qr(self, timeout): pass
+        def submit_password(self, password): pass
+        def auth_status(self): return AuthStatus(False, "auth-password-form")
+    code = main(["telegram", "login"], browser=Browser())
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "rejected the password" in err
+    assert "wrong-password" not in err
+
+
+def test_password_step_no_tty_fails_clearly_instead_of_hanging(tmp_path, monkeypatch, capsys):
+    from qa_cli.browser import AuthStatus
+    from qa_cli.cli import main
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _: None)
+    def raise_eof(*_a, **_k):
+        raise EOFError()
+    monkeypatch.setattr("qa_cli.telegram.getpass.getpass", raise_eof)
+    monkeypatch.setattr("qa_cli.telegram._interactive_input_available", lambda: True)
+    class Browser:
+        def open(self, url): pass
+        def is_logged_in(self): return False
+        def wait_for_qr(self, timeout): pass
+        def auth_status(self): return AuthStatus(False, "auth-password-form")
+    code = main(["telegram", "login"], browser=Browser())
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "interactive" in err
 
 
 def test_qr_file_is_private(tmp_path,monkeypatch):

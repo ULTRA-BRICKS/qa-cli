@@ -13,9 +13,11 @@ QR frame is read with Chromium's native barcode decoder; a module-hook fallback
 is retained for browsers without that API. A blank or loading page is never
 reported as authenticated. Browser subprocesses have a finite timeout.
 
-If Telegram asks for a cloud password or another manual step, login exits with
-code 3 and identifies that step instead of waiting silently. Complete it only in
-the same trusted browser session. Never send OTPs or passwords to a bot or chat.
+If Telegram asks for its two-factor cloud password, login prompts for it right
+in the terminal (masked, like a normal password prompt) and submits it directly
+into the live page -- no headed browser needed. A wrong password, or any other
+manual step this CLI can't automate, is reported distinctly instead of hanging
+silently or falsely reporting success. Never send OTPs or passwords to a bot or chat.
 Ctrl-C exits with code 130. QR screenshots are written with private permissions
 under `~/.config/qa-cli/telegram-qr.png`. They are credentials: do not attach live
 QRs or browser session state to issues, PRs, logs or public QA reports.
@@ -45,3 +47,18 @@ and server error bodies are never copied into the JSON report. Exit 0 means thes
 transport checks passed; exit 1 means failure; exit 2 means invalid arguments.
 The report explicitly says `authenticated_chat_qa: not_run`. It does not claim
 login, summary quality, message delivery, database readiness or history coverage.
+
+
+### Phone number and verification code in the terminal
+
+Run `qa telegram login --phone` for phone login, or `qa telegram login` to keep QR login.
+When Telegram Web requests the number, five-digit code or cloud 2FA password, enter it
+in the same interactive terminal. Input is hidden. Never pass codes/passwords as CLI
+arguments or environment variables. Code, phone and password submission use native browser batches through subprocess stdin,
+only on the visible official Telegram Web A form. Code input triggers Telegram's own
+input handler; the CLI does not poll an inbox or read codes from messages.
+
+Noninteractive execution fails with exit 3 before prompting, rather than echoing a
+secret or hanging. A wrong/expired code remains unauthenticated; rerun the command to
+retry. Successful input submission alone is not authentication: visible logged-in
+shell evidence is still required. No chat message is sent by login/status.

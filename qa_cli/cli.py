@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     tg_sub = tg.add_subparsers(dest="telegram_command", required=True)
-    tg_sub.add_parser(
+    login_parser = tg_sub.add_parser(
         "login",
         help="Open Telegram Web, save QR if needed, wait until logged in",
         description=(
@@ -60,12 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
             "then render it directly in the terminal -- auto-refreshing as "
             "Telegram rotates the token roughly every 20-30s -- while also "
             "saving a screenshot to ~/.config/qa-cli/telegram-qr.png. Scan "
-            "with the Telegram phone app. If Telegram requires an extra "
-            "step this CLI can't automate (e.g. a two-factor password), "
-            "that is reported distinctly instead of hanging until timeout. "
-            "If already logged in, print status and skip QR."
+            "with the Telegram phone app. If Telegram then asks for its "
+            "two-factor cloud password, this prompts for it in the "
+            "terminal (masked, like a normal password prompt) and submits "
+            "it into the page directly. Verification codes are entered in the terminal too; --phone starts phone login. Any other auth step this CLI "
+            "can't automate is reported distinctly instead of hanging "
+            "until timeout. If already logged in, print status and skip QR."
         ),
     )
+    login_parser.add_argument("--phone", action="store_true", help="Use phone-number login and enter its verification code in the terminal")
     tg_sub.add_parser(
         "status",
         help="Print logged-in or logged-out from the persisted session",
@@ -116,7 +119,7 @@ def main(
     try:
         driver = browser if browser is not None else AgentBrowserDriver()
         if args.telegram_command == "login":
-            return login(driver)
+            return login(driver, phone=True) if args.phone else login(driver)
         if args.telegram_command == "status":
             return status(driver)
         return 2

@@ -30,9 +30,35 @@ capture, not successful account authentication or bot behavior.
 uv run --no-project --with 'pytest>=8,<9' --with qrcode pytest tests -q
 ```
 
-Install from the current checkout with `pipx install --force .` (or `./install.sh`).
-The maintained repository is on Forgejo under `ultrabricks/qa-cli`; the old
-GitHub repository is archived. This package does not send chat messages by default.
+## Install
+
+Pick one — each ends with `qa` on your PATH:
+
+```bash
+# 1. uv — recommended; macOS, Linux and Windows (incl. Cygwin / Git Bash)
+uv tool install git+https://git.hyperide.ai/ultrabricks/qa-cli
+
+# 2. pipx
+pipx install git+https://git.hyperide.ai/ultrabricks/qa-cli
+
+# 3. one-liner — clones to ~/.local/share/qa-cli, links qa into ~/.local/bin, registers the agent skill
+curl -fsSL https://git.hyperide.ai/ultrabricks/qa-cli/raw/branch/main/install.sh | bash
+
+# 4. from a clone — to hack on it; `git pull` updates the installed tool
+git clone https://git.hyperide.ai/ultrabricks/qa-cli && cd qa-cli && ./install.sh
+```
+
+- **Update:** `uv tool upgrade qa-cli` · `pipx upgrade qa-cli` · re-run the one-liner · `git pull`.
+- **Via rig:** clone into `~/xp/qa-cli` and list `qa` under `tools.items` in `~/.config/rig/config.yaml` — `rig apply commit` runs its `install.sh` and keeps the clone fresh.
+- **Windows:** use uv (option 1) — `./install.sh` and the one-liner do exactly that under Cygwin / Git Bash. If a command dies with `UnicodeEncodeError` in mintty, run `setx PYTHONUTF8 1` once. More: [rig-cli → Windows](https://git.hyperide.ai/ultrabricks/rig-cli#windows-cygwin-git-bash-powershell).
+
+> **Not on PyPI — always install from the git URL.** A bare `pipx install qa-cli` /
+> `uv tool install qa-cli` does not install this tool: the name is unclaimed on PyPI or (for
+> `rig-cli`, `dev-cli`, `harness-cli`) belongs to an unrelated project. The canonical repo is
+> **git.hyperide.ai/ultrabricks/qa-cli**; `github.com/alex-mextner/qa-cli` is a frozen,
+> archived mirror.
+
+This package does not send chat messages by default.
 
 ## Deployment transport proof
 

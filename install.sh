@@ -14,6 +14,7 @@ FORGE="https://git.hyperide.ai/ultrabricks"   # canonical home; github.com/alex-
 ENTRY="bin/qa"     # path inside repo root
 CLONE_BASE="${XDG_DATA_HOME:-$HOME/.local/share}"
 EXPECT_URL="$FORGE/$REPO.git"
+DIST="hyper-qa"   # PyPI distribution name
 
 # ── Windows (Cygwin / MSYS2 / Git Bash) ───────────────────────────────────────
 # There python, git and uv are native Windows programs: a symlink to the entry script (a
@@ -47,7 +48,7 @@ case "$(uname -s)" in
       echo "        or add it to PATH, then open a new shell."
     fi
     echo ""
-    if [[ -n "${_src:-}" ]]; then _upd="git pull in $_here"; else _upd="uv tool upgrade $REPO"; fi
+    if [[ -n "${_src:-}" ]]; then _upd="git pull in $_here"; else _upd="uv tool upgrade $DIST"; fi
     echo "  $TOOL is installed (uv tool). Update: $_upd"
     exit 0
     ;;

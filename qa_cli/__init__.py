@@ -5,4 +5,4 @@ The CLI logic lives in qa_cli.cli; the console entry point is qa_cli.cli:main
 install path.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

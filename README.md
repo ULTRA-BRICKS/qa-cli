@@ -41,7 +41,7 @@ uv tool install hyper-qa
 # 2. pipx
 pipx install hyper-qa
 
-# 3. one-liner — clones to ~/.local/share/qa-cli, links qa into ~/.local/bin, registers the agent skill
+# 3. one-liner — clones to ~/.local/share/qa-cli, links qa into ~/.local/bin
 curl -fsSL https://git.hyperide.ai/ultrabricks/qa-cli/raw/branch/main/install.sh | bash
 
 # 4. from a clone — to hack on it; `git pull` updates the installed tool
@@ -50,6 +50,7 @@ git clone https://git.hyperide.ai/ultrabricks/qa-cli && cd qa-cli && ./install.s
 
 - **Unreleased `main`:** `uv tool install git+https://git.hyperide.ai/ultrabricks/qa-cli` (or the same with `pipx install`).
 - **Update:** `uv tool upgrade hyper-qa` · `pipx upgrade hyper-qa` · re-run the one-liner · `git pull`.
+- **Installed before the rename** (as `qa-cli`, from git)? Remove that first — `uv tool uninstall qa-cli` or `pipx uninstall qa-cli` — or two installs both claim `qa`.
 - **Via rig:** clone into `~/xp/qa-cli` and list `qa` under `tools.items` in `~/.config/rig/config.yaml` — `rig apply commit` runs its `install.sh` and keeps the clone fresh.
 - **Windows:** use uv (option 1) — `./install.sh` and the one-liner do exactly that under Cygwin / Git Bash. If a command dies with `UnicodeEncodeError` in mintty, run `setx PYTHONUTF8 1` once. More: [rig-cli → Windows](https://git.hyperide.ai/ultrabricks/rig-cli#windows-cygwin-git-bash-powershell).
 

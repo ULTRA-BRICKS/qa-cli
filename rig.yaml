@@ -14,3 +14,10 @@ ci:
     tests:
       enabled: true
       tier: block
+
+task:
+  backend: forgejo
+  forgejo:
+    url: https://git.hyperide.ai
+    repo: ultrabricks/qa-cli
+    attachment_mode: native

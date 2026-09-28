@@ -50,6 +50,8 @@ from qa_cli.auth_input import CODE_FORM, PHONE_FORM
 DEFAULT_LOGIN_TIMEOUT = 300.0
 DEFAULT_QR_WAIT_TIMEOUT = 60.0
 DEFAULT_POLL_INTERVAL = 1.0
+DEFAULT_STATUS_TIMEOUT = 15.0
+STATUS_POLL_INTERVAL = 0.5
 
 _QR_URL_PREFIX = "tg://login?token="
 
@@ -302,9 +304,36 @@ def login(
 
 
 def status(browser: BrowserDriver) -> int:
-    browser.open(TELEGRAM_WEB_URL)
-    state = "logged-in" if browser.is_logged_in() else "logged-out"
+    """Observe a restored session; missing page evidence is not evidence of logout."""
+    deadline = time.monotonic() + DEFAULT_STATUS_TIMEOUT
+    set_deadline = getattr(browser, "set_deadline", None)
+    if set_deadline:
+        set_deadline(deadline)
+    try:
+        browser.open(TELEGRAM_WEB_URL)
+        while True:
+            observed = browser.auth_status()
+            if observed.logged_in:
+                state = "logged-in"
+                break
+            if observed.waiting_form:
+                state = "logged-out"
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                state = "unknown"
+                break
+            time.sleep(min(STATUS_POLL_INTERVAL, remaining))
+    except TimeoutError:
+        # A deadline expiring between probes is still inconclusive, not a login request.
+        state = "unknown"
+    finally:
+        if set_deadline:
+            set_deadline(None)
     print(state)
     print(f"session: {SESSION_NAME}")
     print(f"config: {config_dir()}")
+    if state == "unknown":
+        print("Telegram Web is still loading or unavailable; retry: qa telegram status", file=sys.stderr)
+        return 1
     return 0

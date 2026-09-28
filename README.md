@@ -11,7 +11,10 @@ In an interactive terminal login uses an alternate-screen QR view, refreshes the
 QR when Telegram rotates it, and restores the terminal/cursor on exit. The first
 QR frame is read with Chromium's native barcode decoder; a module-hook fallback
 is retained for browsers without that API. A blank or loading page is never
-reported as authenticated. Browser subprocesses have a finite timeout.
+reported as authenticated or logged-out. Status waits for conclusive evidence,
+returns `unknown` with exit 1 after its bounded wait, and preserves the selected
+chat. See [session status and restoration](docs/session-status.md). Browser
+subprocesses have a finite timeout.
 
 If Telegram asks for its two-factor cloud password, login prompts for it right
 in the terminal (masked, like a normal password prompt) and submits it directly

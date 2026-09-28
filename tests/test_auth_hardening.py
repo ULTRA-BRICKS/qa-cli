@@ -9,7 +9,7 @@ from qa_cli.browser import AgentBrowserDriver, BrowserError, _AUTH_STATUS_JS
 from qa_cli.telegram import _TerminalQrPainter
 
 def test_blank_page_is_not_authenticated():
-    script = "global.document={readyState:'complete',querySelector:()=>null,querySelectorAll:()=>[]};console.log(" + _AUTH_STATUS_JS + ")"
+    script = "global.location=new URL('https://web.telegram.org/a/');global.document={readyState:'complete',querySelector:()=>null,querySelectorAll:()=>[]};console.log(" + _AUTH_STATUS_JS + ")"
     value = json.loads(subprocess.check_output(["node", "-e", script], text=True))
     assert value["loggedIn"] is False
 
@@ -89,7 +89,7 @@ def test_transient_qr_hook_failure_recovers(monkeypatch):
 
 
 def test_hidden_shell_does_not_authenticate():
-    script = """global.getComputedStyle=()=>({visibility:'hidden',opacity:'1',display:'block'});
+    script = """global.location=new URL('https://web.telegram.org/a/');global.getComputedStyle=()=>({visibility:'hidden',opacity:'1',display:'block'});
     const shell={getClientRects:()=>[1]};
     global.document={querySelector:(s)=>s.includes('#Main')?shell:null,querySelectorAll:()=>[]};
     console.log(""" + _AUTH_STATUS_JS + ")"

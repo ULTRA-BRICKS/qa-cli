@@ -155,6 +155,7 @@ def _is_qr_visible_against(
     return driver.is_qr_visible()
 
 _AUTH_STATUS_HARNESS = """
+global.location = new URL("https://web.telegram.org/a/");
 const payload = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 global.document = {
   querySelectorAll(sel) { return payload.formId ? [{ id: payload.formId }] : []; },
@@ -348,7 +349,8 @@ def test_status_logged_out_without_session(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
-    fake = FakeBrowserDriver(logged_in=False)
+    # A visible login form proves logout; an absent shell alone does not.
+    fake = FakeBrowserDriver(logged_in=False, waiting_form="auth-qr-form")
     code = main(["telegram", "status"], browser=fake)
     assert code == 0
     out = capsys.readouterr().out

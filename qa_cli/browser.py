@@ -60,7 +60,16 @@ class AuthStatus(NamedTuple):
 
 # Positive visible main-shell evidence is required. Hidden/stale auth forms,
 # a blank page or a slow lazy module must not become a false authenticated state.
+_IS_OFFICIAL_TELEGRAM_PAGE_JS = """(() => {
+  try {
+    const url = new URL(location.href);
+    return url.origin === 'https://web.telegram.org' && url.pathname === '/a/'
+      && !url.username && !url.password;
+  } catch (_) { return false; }
+})()"""
+
 _AUTH_STATUS_JS = """(() => {
+  if (!(""" + _IS_OFFICIAL_TELEGRAM_PAGE_JS + """)) return JSON.stringify({loggedIn: false, waitingForm: null});
   const visible = (el) => {
     if (!el || (el.getClientRects && !el.getClientRects().length)) return false;
     if (typeof getComputedStyle !== 'function') return true;
@@ -369,6 +378,10 @@ class AgentBrowserDriver:
     def open(self, url: str) -> None:
         self._image_decoder_supported = True
         self._qr_failure_since = None
+        # A status check must not reload a selected chat or restart lazy hydration.
+        # Authentication probes also check the origin, including after navigation.
+        if url == TELEGRAM_WEB_URL and self._eval_json(_IS_OFFICIAL_TELEGRAM_PAGE_JS) is True:
+            return
         self._run("open", url)
 
     def screenshot(self, path: str) -> None:

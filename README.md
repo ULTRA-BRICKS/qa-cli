@@ -57,7 +57,41 @@ git clone https://git.hyperide.ai/ultrabricks/qa-cli && cd qa-cli && ./install.s
 > **On PyPI as `hyper-qa`** (the command is still `qa`). The canonical repo is
 > **git.hyperide.ai/ultrabricks/qa-cli**; `github.com/alex-mextner/qa-cli` is a frozen, archived mirror.
 
-This package does not send chat messages by default.
+Only `qa telegram chat send|send-file|click` write to a chat, and only to the bot named by `--peer`.
+
+## Bot chat automation (end-to-end runs)
+
+```sh
+qa telegram chat open  --peer <bot id> --username <bot username>
+qa telegram chat read  --peer <bot id> --after <message id> --limit 20
+qa telegram chat send  --peer <bot id> --reply-to <message id> --text '/agent foo ping'
+qa telegram chat send-file --peer <bot id> --reply-to <message id> --file note.ogg
+qa telegram chat click --peer <bot id> --message <message id> --button Alpha
+qa telegram chat wait  --peer <bot id> --after <message id> --contains 'ACK foo' --timeout 120
+qa telegram chat screenshot --peer <bot id> --out chat.png
+```
+
+Drives ONE bot chat of the logged-in account and prints one JSON object per
+command (exit 0 ok, 1 failure/timeout, 2 refused, 3 not logged in). It runs in
+its own agent-browser session, `qa-telegram-chat`, restored from the
+`qa-telegram` login and never saved back, so `qa telegram status|login` cannot
+close the chat mid-run. Writes (send, send-file, click) go only to `--peer`, and
+are refused unless the chat header says it is a bot (`--allow-non-bot`
+overrides); send and send-file are also refused while the composer holds a
+draft (a draft is the account owner's cloud-synced text). Typed text
+travels through agent-browser's stdin, never argv. Replies use the message
+context menu; files are pasted into the composer (an audio file is sent as
+audio). Text matching is NFKC-normalized, so bot names styled with Unicode
+math letters match plain ASCII.
+
+Caveats: message ids are this account's ids — in a private chat a bot sees
+different ids for the same messages, so correlate by content markers. Opening
+the chat marks its messages read for the whole account. With bot topics
+(threaded mode) on, a message that is not a reply starts a NEW topic; reply to
+a main-chat message to stay in the main chat. Telegram Web's bot-chat view
+can stop rendering new messages, so `wait` re-opens the chat after every 15 s
+without a match; a wait shorter than that never refreshes. tg-cli's live e2e
+harness (`bun scripts/e2e-telegram.ts` in tg-cli) is the main consumer.
 
 ## Deployment transport proof
 

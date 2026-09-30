@@ -298,8 +298,19 @@ def _coerce_token(value) -> Optional[str]:
 class AgentBrowserDriver:
     """Drives Telegram Web through the agent-browser CLI (stdlib subprocess)."""
 
-    def __init__(self, binary: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        binary: Optional[str] = None,
+        session: str = SESSION_NAME,
+        restore_save: Optional[str] = None,
+    ) -> None:
         self.binary = binary or browser_bin()
+        # `session` names the agent-browser daemon; auth state is always
+        # restored from the login key SESSION_NAME. A non-login session (the
+        # chat automation one) passes restore_save="never" so it can never
+        # write its state back over the login key.
+        self.session = session
+        self.restore_save = restore_save
         self._qr_failure_since: Optional[float] = None
         self._image_decoder_supported = True
         self._deadline: Optional[float] = None
@@ -307,12 +318,14 @@ class AgentBrowserDriver:
     def build_argv(self, *args: str) -> list[str]:
         # Explicit restore key so the `open` subcommand is never parsed as the
         # optional --restore name.
+        save = ["--restore-save", self.restore_save] if self.restore_save else []
         return [
             self.binary,
             "--session",
-            SESSION_NAME,
+            self.session,
             "--restore",
             SESSION_NAME,
+            *save,
             *args,
         ]
 
@@ -403,6 +416,29 @@ class AgentBrowserDriver:
         return value. Use for any JS that embeds a live secret."""
         proc = self._run_stdin("eval", "--stdin", input_text=js)
         return self._decode_eval_result((proc.stdout or "").strip())
+
+    def eval_json(self, js: str):
+        """Run page JS passed via argv; decode its JSON.stringify(...) result."""
+        return self._eval_json(js)
+
+    def eval_json_stdin(self, js: str):
+        """Run page JS piped via stdin (large payloads, e.g. a file upload)."""
+        return self._eval_json_stdin(js)
+
+    def batch(self, commands) -> None:
+        """Run agent-browser commands in order, stopping at the first failure.
+
+        Commands travel via stdin, so typed text never appears in argv."""
+        proc = self._run_stdin('batch', '--bail', '--json', input_text=json.dumps(commands))
+        try:
+            results = json.loads(proc.stdout)
+        except (ValueError, TypeError):
+            raise BrowserError('agent-browser batch returned an unreadable response') from None
+        if not isinstance(results, list) or len(results) != len(commands):
+            raise BrowserError('agent-browser batch returned an incomplete response')
+        for index, item in enumerate(results):
+            if not isinstance(item, dict) or item.get('success') is not True:
+                raise BrowserError(f"agent-browser batch step {index + 1} ({commands[index][0]}) failed")
 
     def auth_status(self) -> AuthStatus:
         data = self._eval_json(_AUTH_STATUS_JS)

@@ -69,7 +69,7 @@ def test_phone_option_selects_terminal_flow(monkeypatch):
     seen = []
     monkeypatch.setattr(telegram, 'login', lambda _driver, **kwargs: seen.append(kwargs) or 0)
     assert main(['telegram', 'login', '--phone'], browser=CodeFlow()) == 0
-    assert seen == [{'phone': True}]
+    assert seen == [{'phone': True, 'timeout': telegram.DEFAULT_LOGIN_TIMEOUT, 'qr_hook': None}]
 
 def test_secure_getpass_rejects_echo_fallback(monkeypatch):
     import warnings

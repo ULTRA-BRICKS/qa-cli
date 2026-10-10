@@ -23,14 +23,19 @@ file directly.
 """
 from __future__ import annotations
 
+import contextlib
 import getpass
+import math
 import warnings
 import io
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import IO, Optional, Sequence
 
 import qrcode
 
@@ -48,6 +53,7 @@ from qa_cli.browser import (
 from qa_cli.auth_input import CODE_FORM, PHONE_FORM
 
 DEFAULT_LOGIN_TIMEOUT = 300.0
+LOGIN_TIMEOUT_ENV = "QA_TELEGRAM_LOGIN_TIMEOUT"
 DEFAULT_QR_WAIT_TIMEOUT = 60.0
 DEFAULT_POLL_INTERVAL = 1.0
 
@@ -74,6 +80,102 @@ def config_dir() -> Path:
 
 def qr_path() -> Path:
     return config_dir() / "telegram-qr.png"
+
+
+def parse_login_timeout(text: str) -> float:
+    """Seconds `login` waits for the scan: a finite number >= 0, where 0 means
+    no deadline (a remote human may need longer than any fixed default)."""
+    value = float(text)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{text!r} is not a number of seconds >= 0")
+    return value
+
+
+class _QrHook:
+    """Runs the operator's --qr-hook command with each freshly written QR PNG
+    path appended, so an agent can forward every rotated QR to a remote human.
+
+    The hook is never waited on while the login polls: a slow upload must not
+    stall QR polling, and a hook that fails must not abort the login. Its output
+    never reaches the terminal (it would scribble over the in-place QR view);
+    stderr is kept in a temp file and quoted in the warning when the hook fails.
+    A run's QR expires within a minute, so a run that outlives MAX_AGE, or is
+    still going FINAL_GRACE after the login ended, is killed with its process
+    group: forwarding a dead QR is pointless, and over a `--timeout 0` wait a
+    hung run would otherwise hold a process and a growing stderr file forever.
+    """
+
+    # Telegram rotates the QR every ~20-30 s; a minute-old run is forwarding a dead one.
+    MAX_AGE = 60.0
+    # When the login ends, hooks still running get this long to finish so their
+    # failures are reported; then they are killed.
+    FINAL_GRACE = 5.0
+    # Hung runs are killed only at MAX_AGE; until then, past this many unfinished
+    # runs, new QRs skip the hook with a warning instead of stacking processes.
+    MAX_RUNNING = 4
+
+    def __init__(self, argv: Sequence[str]) -> None:
+        self._argv = list(argv)
+        self._running: list[tuple[subprocess.Popen, IO[bytes], float]] = []
+
+    def fire(self, png: Path) -> None:
+        self.reap()
+        if len(self._running) >= self.MAX_RUNNING:
+            print(
+                f"warning: --qr-hook: {len(self._running)} earlier runs are still going; skipping this QR",
+                file=sys.stderr,
+            )
+            return
+        try:
+            err = tempfile.TemporaryFile()
+        except OSError as exc:
+            print(f"warning: --qr-hook did not start: {exc}", file=sys.stderr)
+            return
+        try:
+            proc = subprocess.Popen(
+                [*self._argv, str(png)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            err.close()
+            print(f"warning: --qr-hook did not start: {exc}", file=sys.stderr)
+            return
+        self._running.append((proc, err, time.monotonic()))
+
+    def reap(self, final: bool = False) -> None:
+        """Report finished runs and kill expired ones; `final` (the login ended)
+        first gives every run FINAL_GRACE to finish, then kills the rest."""
+        if not self._running:
+            return
+        now = time.monotonic()
+        grace_end = now + self.FINAL_GRACE
+        running = []
+        for proc, err, started in self._running:
+            try:
+                code = proc.wait(max(0.0, grace_end - time.monotonic())) if final else proc.poll()
+            except subprocess.TimeoutExpired:
+                code = None
+            if code is None and (final or now - started >= self.MAX_AGE):
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                err.close()
+                why = "was still running when the login ended" if final else f"ran over {self.MAX_AGE:.0f} s"
+                print(f"warning: --qr-hook {why}; killed", file=sys.stderr)
+                continue
+            if code is None:
+                running.append((proc, err, started))
+                continue
+            if code != 0:
+                err.seek(max(0, err.seek(0, os.SEEK_END) - 300))
+                detail = err.read().decode(errors="replace").strip()
+                how = f"was killed by signal {-code}" if code < 0 else f"exited {code}"
+                print(f"warning: --qr-hook {how}" + (f": {detail}" if detail else ""), file=sys.stderr)
+            err.close()
+        self._running = running
 
 
 def render_qr_ascii(data: str) -> str:
@@ -204,9 +306,11 @@ def _run_qr_login_loop(
     timeout: float,
     poll_interval: float,
     out,
+    qr_hook: Optional[_QrHook] = None,
 ) -> None:
     dest = qr_path()
-    deadline = time.monotonic() + timeout
+    # timeout 0: no deadline -- keep refreshing the QR until someone scans it.
+    deadline = time.monotonic() + timeout if timeout else None
     painter = _TerminalQrPainter(out)
     try:
         last_rendered = None
@@ -214,7 +318,7 @@ def _run_qr_login_loop(
         manual_polls = 0
         status: AuthStatus = browser.auth_status()
         while not status.logged_in:
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 dump = browser.diagnostic_dump()
                 raise TimeoutError(
                     "timed out waiting for Telegram Web QR login "
@@ -240,6 +344,8 @@ def _run_qr_login_loop(
                         render_qr_ascii(f"{_QR_URL_PREFIX}{token}"),
                     )
                     last_rendered = key
+                    if qr_hook is not None:
+                        qr_hook.fire(dest)
                 elif not token and last_rendered is None:
                     painter.render("waiting for Telegram to generate a QR code…")
                     last_rendered = ("pending", None)
@@ -264,6 +370,8 @@ def _run_qr_login_loop(
             status = browser.auth_status()
     finally:
         painter.close()
+        if qr_hook is not None:
+            qr_hook.reap(final=True)
 
 
 def login(
@@ -273,14 +381,18 @@ def login(
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     out=None,
     phone: bool = False,
+    qr_hook: Optional[Sequence[str]] = None,
 ) -> int:
+    """Log in to Telegram Web. `timeout` bounds the wait for the scan in
+    seconds (0 = no deadline); `qr_hook` is an argv run with the QR PNG path
+    appended every time a new QR is written."""
     directory = config_dir()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not os.environ.get("QA_CONFIG_DIR"):
         directory.chmod(0o700)
     set_deadline = getattr(browser, "set_deadline", None)
     if set_deadline:
-        set_deadline(time.monotonic() + timeout + qr_timeout)
+        set_deadline(time.monotonic() + timeout + qr_timeout if timeout else None)
     try:
         browser.open(TELEGRAM_WEB_URL)
         if not browser.is_logged_in():
@@ -289,7 +401,11 @@ def login(
                 browser.switch_to_phone()
             if not browser.is_logged_in():
                 _run_qr_login_loop(
-                    browser, timeout, poll_interval, out if out is not None else sys.stdout
+                    browser,
+                    timeout,
+                    poll_interval,
+                    out if out is not None else sys.stdout,
+                    _QrHook(qr_hook) if qr_hook else None,
                 )
     finally:
         if set_deadline:

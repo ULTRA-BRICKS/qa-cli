@@ -9,6 +9,9 @@ from --help/--version/usage is converted to a return code (0 or 2).
 from __future__ import annotations
 
 import argparse
+import os
+import shlex
+import shutil
 import sys
 from typing import Optional, Sequence
 
@@ -21,6 +24,24 @@ from qa_cli.browser import (
     BrowserMissingError,
     INSTALL_HINT,
 )
+
+
+def _login_timeout_arg(text: str) -> float:
+    from qa_cli.telegram import parse_login_timeout
+
+    try:
+        return parse_login_timeout(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r}: expected seconds >= 0 (0 = wait forever)") from None
+
+
+def _qr_hook_arg(text: str) -> list[str]:
+    argv = shlex.split(text)
+    if not argv:
+        raise argparse.ArgumentTypeError("empty command")
+    if shutil.which(argv[0]) is None:
+        raise argparse.ArgumentTypeError(f"{argv[0]}: command not found")
+    return argv
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,6 +90,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     login_parser.add_argument("--phone", action="store_true", help="Use phone-number login and enter its verification code in the terminal")
+    login_parser.add_argument(
+        "--timeout",
+        type=_login_timeout_arg,
+        default=None,
+        metavar="SEC",
+        help=(
+            "seconds to wait for the scan, the QR refreshing meanwhile; 0 waits "
+            "forever (default: $QA_TELEGRAM_LOGIN_TIMEOUT, else 300)"
+        ),
+    )
+    login_parser.add_argument(
+        "--qr-hook",
+        type=_qr_hook_arg,
+        default=None,
+        metavar="CMD",
+        help=(
+            "run CMD (split like a shell command line, not run by a shell) with "
+            "the QR PNG path appended each time a new QR is saved -- the first one "
+            "and every rotation -- e.g. to forward it to a remote human. Not waited "
+            "on; a failing hook only warns. A run still going after 60 s or 5 s "
+            "after the login ends is killed; while 4 runs are still going a new QR "
+            "skips it. Copy the PNG promptly: the next rotation overwrites it"
+        ),
+    )
     tg_sub.add_parser(
         "status",
         help="Print logged-in or logged-out from the persisted session",
@@ -184,11 +229,30 @@ def main(
                 session=CHAT_SESSION_NAME, restore_save="never"
             )
             return run_chat_command(args, chat_driver)
-        from qa_cli.telegram import login, status
+        from qa_cli.telegram import (
+            DEFAULT_LOGIN_TIMEOUT,
+            LOGIN_TIMEOUT_ENV,
+            login,
+            parse_login_timeout,
+            status,
+        )
 
+        timeout = args.timeout if args.telegram_command == "login" else None
+        env_timeout = os.environ.get(LOGIN_TIMEOUT_ENV, "")
+        if args.telegram_command == "login" and timeout is None and env_timeout:
+            try:
+                timeout = parse_login_timeout(env_timeout)
+            except ValueError as exc:
+                print(f"error: {LOGIN_TIMEOUT_ENV}: {exc} (0 = wait forever)", file=sys.stderr)
+                return 2
         driver = browser if browser is not None else AgentBrowserDriver()
         if args.telegram_command == "login":
-            return login(driver, phone=True) if args.phone else login(driver)
+            return login(
+                driver,
+                timeout=DEFAULT_LOGIN_TIMEOUT if timeout is None else timeout,
+                phone=args.phone,
+                qr_hook=args.qr_hook,
+            )
         if args.telegram_command == "status":
             return status(driver)
         return 2

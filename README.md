@@ -22,6 +22,21 @@ Ctrl-C exits with code 130. QR screenshots are written with private permissions
 under `~/.config/qa-cli/telegram-qr.png`. They are credentials: do not attach live
 QRs or browser session state to issues, PRs, logs or public QA reports.
 
+Login waits 300 s for the scan by default. `--timeout <sec>` (or
+`QA_TELEGRAM_LOGIN_TIMEOUT`, which the flag overrides) changes that; `0` waits
+forever, refreshing the QR the whole time. `--qr-hook <cmd>` runs `cmd` (split
+like a shell command line, not run by a shell) with the PNG path appended each
+time a new QR is saved, the first one and every rotation, so an agent can hand
+each fresh QR to a remote human who scans it. The hook is not waited on; a
+failing hook only warns, quoting its stderr. A run still going after 60 s (its
+QR is dead by then) or 5 s after the login ends is killed, and while 4 earlier
+runs are still going a new QR skips the hook. Copy the PNG promptly, because the
+next rotation overwrites it, and send it only to the person who will scan it:
+
+```sh
+qa telegram login --timeout 0 --qr-hook 'sh -c "cp \"$1\" /tmp/qr-$(date +%s).png" _'
+```
+
 Non-interactive output does not emit terminal-control sequences. Tests use fake
 browsers and explicitly synthetic QR payloads. A live QR capture proves only QR
 capture, not successful account authentication or bot behavior.

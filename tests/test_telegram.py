@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -753,3 +754,221 @@ def test_login_reports_unsupported_auth_step_distinctly(
     rendered = buf.getvalue()
     assert not any(c[0] == "screenshot" for c in fake.calls)
     assert not any(c[0] == "submit_password" for c in fake.calls)
+
+
+# ---- login timeout + QR hook (qa-cli#31) ------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_host_login_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The operator's own QA_TELEGRAM_LOGIN_TIMEOUT must not leak into tests.
+    monkeypatch.delenv("QA_TELEGRAM_LOGIN_TIMEOUT", raising=False)
+
+
+class DeadlineRecordingFake(FakeBrowserDriver):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.deadlines: list = []
+
+    def set_deadline(self, deadline) -> None:
+        self.deadlines.append(deadline)
+
+
+def _clock(monkeypatch: pytest.MonkeyPatch, *ticks: float) -> None:
+    # login's QR loop reads monotonic() once for the deadline, then once per poll.
+    it = iter(ticks)
+    monkeypatch.setattr("qa_cli.telegram.time.monotonic", lambda: next(it, 10.0**12))
+
+
+def _screenshots(fake: FakeBrowserDriver) -> int:
+    return [c[0] for c in fake.calls].count("screenshot")
+
+
+def test_login_timeout_flag_extends_the_qr_wait(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    # 599 s in: past the 300 s default, inside --timeout 600; 601 s: past both.
+    _clock(monkeypatch, 0.0, 599.0, 601.0)
+    fake = FakeBrowserDriver(logged_in=False, become_logged_in_after=10**9)
+    code = main(["telegram", "login", "--timeout", "600"], browser=fake)
+    assert code == 1
+    assert "timed out" in capsys.readouterr().err
+    assert _screenshots(fake) == 1
+
+
+def test_login_timeout_zero_waits_forever_without_a_browser_deadline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    _clock(monkeypatch, 0.0, 10.0**6, 10.0**7, 10.0**8)
+    fake = DeadlineRecordingFake(logged_in=False, become_logged_in_after=3)
+    code = main(["telegram", "login", "--timeout", "0"], browser=fake)
+    assert code == 0
+    assert "logged-in" in capsys.readouterr().out
+    assert all(d is None for d in fake.deadlines)
+
+
+def test_login_timeout_env_applies_and_the_flag_overrides_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    monkeypatch.setenv("QA_TELEGRAM_LOGIN_TIMEOUT", "600")
+    _clock(monkeypatch, 0.0, 599.0, 601.0)
+    fake = FakeBrowserDriver(logged_in=False, become_logged_in_after=10**9)
+    assert main(["telegram", "login"], browser=fake) == 1
+    assert _screenshots(fake) == 1
+
+    _clock(monkeypatch, 0.0, 599.0, 601.0)
+    fake = FakeBrowserDriver(logged_in=False, become_logged_in_after=10**9)
+    assert main(["telegram", "login", "--timeout", "300"], browser=fake) == 1
+    assert _screenshots(fake) == 0
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("value", ["-1", "abc", "nan", "inf"])
+def test_login_timeout_flag_rejects_bad_values(value: str, capsys: pytest.CaptureFixture[str]) -> None:
+    fake = FakeBrowserDriver(logged_in=True)
+    assert main(["telegram", "login", "--timeout", value], browser=fake) == 2
+    assert "--timeout" in capsys.readouterr().err
+    assert fake.calls == []
+
+
+def test_login_timeout_env_rejects_bad_values(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_TELEGRAM_LOGIN_TIMEOUT", "5m")
+    fake = FakeBrowserDriver(logged_in=True)
+    assert main(["telegram", "login"], browser=fake) == 2
+    assert "QA_TELEGRAM_LOGIN_TIMEOUT" in capsys.readouterr().err
+    assert fake.calls == []
+
+
+def _wait_for_files(directory: Path, count: int) -> list[Path]:
+    # The hook runs detached (login never waits on it): give it a moment to land.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        found = sorted(directory.glob("qr-*.png"))
+        if len(found) >= count:
+            return found
+        time.sleep(0.05)
+    return sorted(directory.glob("qr-*.png"))
+
+
+def test_login_qr_hook_runs_with_the_png_on_every_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    seen = tmp_path / "seen"
+    seen.mkdir()
+    # $0 = the seen dir, $1 = the PNG path login appends; cp to a dotfile then mv,
+    # so a qr-*.png only appears once fully copied.
+    hook = f"sh -c 'cp \"$1\" \"$0/.part-$$\" && mv \"$0/.part-$$\" \"$0/qr-$$.png\"' {seen}"
+    fake = FakeBrowserDriver(logged_in=False, qr_tokens=["TOKEN_A", "TOKEN_B"], become_logged_in_after=3)
+    code = main(["telegram", "login", "--qr-hook", hook], browser=fake)
+    assert code == 0
+    copies = _wait_for_files(seen, 2)
+    assert len(copies) == 2
+    assert all(p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n" for p in copies)
+
+
+def test_login_qr_hook_failure_never_aborts_login_and_is_reported_with_its_stderr(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    fake = FakeBrowserDriver(logged_in=False, become_logged_in_after=3)
+    hook = "sh -c 'echo boom >&2; echo chatter; exit 3' _"
+    assert main(["telegram", "login", "--qr-hook", hook], browser=fake) == 0
+    captured = capsys.readouterr()
+    assert "logged-in" in captured.out
+    assert "chatter" not in captured.out
+    assert "warning: --qr-hook exited 3: boom" in captured.err
+
+
+def test_login_qr_hook_killed_by_a_signal_is_reported_as_such(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    fake = FakeBrowserDriver(logged_in=False, become_logged_in_after=3)
+    assert main(["telegram", "login", "--qr-hook", "sh -c 'kill -9 $$' _"], browser=fake) == 0
+    assert "warning: --qr-hook was killed by signal 9" in capsys.readouterr().err
+
+
+def test_login_qr_hook_runs_that_hang_are_capped_instead_of_piling_up(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With --timeout 0 a stalled uploader must not stack one process (and one
+    # open stderr file) per QR rotation until the login runs out of descriptors.
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    tokens = [f"TOKEN_{i}" for i in range(8)]
+    fake = FakeBrowserDriver(logged_in=False, qr_tokens=tokens, become_logged_in_after=8)
+    assert main(["telegram", "login", "--qr-hook", "sh -c 'sleep 1' _"], browser=fake) == 0
+    assert [c[0] for c in fake.calls].count("screenshot") == 8
+    err = capsys.readouterr().err
+    assert err.count("skipping this QR") == 4
+
+
+def test_login_qr_hook_run_older_than_its_max_age_is_killed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A hung upload of an expired QR is moot: it is killed, so it neither blocks
+    # forwarding newer QRs nor grows its stderr file for the rest of a long wait.
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    monkeypatch.setattr("qa_cli.telegram._QrHook.MAX_AGE", 0.0)
+    monkeypatch.setattr("qa_cli.telegram._QrHook.FINAL_GRACE", 0.1)
+    tokens = [f"TOKEN_{i}" for i in range(8)]
+    fake = FakeBrowserDriver(logged_in=False, qr_tokens=tokens, become_logged_in_after=8)
+    assert main(["telegram", "login", "--qr-hook", "sh -c 'sleep 30' _"], browser=fake) == 0
+    err = capsys.readouterr().err
+    assert "skipping this QR" not in err
+    assert "--qr-hook ran over 0 s; killed" in err
+
+
+def test_login_qr_hook_still_running_when_login_ends_is_killed_after_the_grace(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    monkeypatch.setattr("qa_cli.telegram._QrHook.FINAL_GRACE", 0.2)
+    pids = tmp_path / "pids"
+    pids.mkdir()
+    # The hook's child (sleep) shares its session, so the whole group must go.
+    hook = f"sh -c 'sleep 30 & echo $! > \"$0/child\"; wait' {pids}"
+    fake = FakeBrowserDriver(logged_in=False, become_logged_in_after=3)
+    assert main(["telegram", "login", "--qr-hook", hook], browser=fake) == 0
+    assert "--qr-hook was still running when the login ended; killed" in capsys.readouterr().err
+    child = int((pids / "child").read_text())
+    # Killed with its group; init reaps the orphaned sleep shortly after.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+    else:
+        pytest.fail(f"the hook's child {child} outlived the login")
+
+
+def test_login_qr_hook_that_is_not_installed_exits_2_before_opening_the_browser(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = FakeBrowserDriver(logged_in=False)
+    assert main(["telegram", "login", "--qr-hook", "no-such-qr-hook-binary --flag"], browser=fake) == 2
+    assert "no-such-qr-hook-binary" in capsys.readouterr().err
+    assert fake.calls == []
+
+
+def test_login_help_documents_timeout_and_qr_hook(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["telegram", "login", "--help"]) == 0
+    out = capsys.readouterr().out
+    assert "--timeout" in out
+    assert "QA_TELEGRAM_LOGIN_TIMEOUT" in out
+    assert "--qr-hook" in out

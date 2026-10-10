@@ -58,6 +58,19 @@ class AuthStatus(NamedTuple):
     waiting_form: Optional[str]
 
 
+class PasswordStepState(NamedTuple):
+    """Telegram Web A's cloud-password form as rendered right now."""
+
+    present: bool
+    # Telegram is verifying a submitted password (submit button spinner).
+    checking: bool
+    # Telegram's own error text from the input label, e.g. "Invalid password,
+    # please try again" or a flood-wait notice; None without an error.
+    error: Optional[str]
+    # The account's password hint; None when none is set (or not knowable).
+    hint: Optional[str]
+
+
 # Positive visible main-shell evidence is required. Hidden/stale auth forms,
 # a blank page or a slow lazy module must not become a false authenticated state.
 _AUTH_STATUS_JS = """(() => {
@@ -161,16 +174,37 @@ _DIAGNOSTIC_JS = """JSON.stringify({
   authForm: (document.querySelector('[id^="auth-"][id$="-form"]') || {}).id || null
 })"""
 
-# Called only while auth_status().waiting_form == "auth-password-form". Sets
-# Telegram's live #sign-in-password input via the native value setter (so
-# the framework's change listener fires exactly as it would for real
-# typing), then submits the form. `__QA_PASSWORD_JSON__` is a placeholder,
-# string-replaced with a json.dumps(...) literal by submit_password() just
-# before sending -- it is a valid, escaped JS string literal, never a raw
-# string interpolation. Defensive: falls back from the known input id to
-# any password input inside the form, and reports a distinct failure
-# reason (never page content or the password) if the form or input is
-# missing instead of silently doing nothing.
+# Side-effect free: Telegram's own verdict on the cloud-password step, read
+# from the DOM telegram-tt renders (AuthPassword.tsx -> PasswordForm.tsx):
+# the submit <Button> carries class `loading` while auth.isLoading (the SRP
+# check / GetPassword re-fetch is in flight, and Telegram ignores further
+# submits); `.input-group.error` marks a failed check, and the one <label>
+# then shows Telegram's localized error text. Without an error that label
+# reads `auth.hint || lang('PasswordFormPlaceholder')`, so it is returned
+# raw with the UI language and password_state() decides whether it is a hint.
+_PASSWORD_STATE_JS = """(() => {
+  const form = document.getElementById('auth-password-form');
+  if (!form) return JSON.stringify({present: false});
+  const group = form.querySelector('.input-group.password-input');
+  const label = group && group.querySelector('label');
+  const text = label ? (label.textContent || '').trim() : '';
+  const button = form.querySelector('button[type="submit"]');
+  const failed = !!group && group.classList.contains('error');
+  return JSON.stringify({
+    present: true,
+    checking: !!button && button.classList.contains('loading'),
+    error: failed ? text : null,
+    label: failed ? null : text,
+    lang: document.documentElement.lang || ''
+  });
+})()"""
+
+# Telegram's fallback-language placeholder for the password label
+# (fallback.strings "PasswordFormPlaceholder"). Pre-login Web A runs in
+# English unless the restored session picked another UI language.
+_PASSWORD_PLACEHOLDER = "Password"
+_PAGE_TEXT_LIMIT = 200
+
 # Side-effect free: painted QR canvas, QR <img>, or QR-related <svg>.
 # Telegram sizes a canvas before drawing; dimensions alone are not ready.
 # Live Web A currently paints the login QR as SVG inside .qr-container.
@@ -279,6 +313,7 @@ class BrowserDriver(Protocol):
     def is_logged_in(self) -> bool: ...
     def wait_for_qr(self, timeout: float) -> None: ...
     def auth_status(self) -> AuthStatus: ...
+    def password_state(self) -> PasswordStepState: ...
     def get_qr_token(self) -> Optional[str]: ...
     def diagnostic_dump(self) -> str: ...
     def submit_password(self, password: str) -> None: ...
@@ -293,6 +328,15 @@ def browser_bin() -> str:
 
 def _coerce_token(value) -> Optional[str]:
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", value) else None
+
+
+def _page_text(value) -> Optional[str]:
+    """Page-controlled text made safe to print: no terminal control
+    sequences (a hint is account-owner input), bounded length."""
+    if not isinstance(value, str):
+        return None
+    text = "".join(ch for ch in value if ch.isprintable()).strip()
+    return text[:_PAGE_TEXT_LIMIT] or None
 
 
 class AgentBrowserDriver:
@@ -448,6 +492,23 @@ class AgentBrowserDriver:
         return AuthStatus(
             logged_in=data.get("loggedIn") is True,
             waiting_form=waiting_form if isinstance(waiting_form, str) else None,
+        )
+
+    def password_state(self) -> PasswordStepState:
+        data = self._eval_json(_PASSWORD_STATE_JS)
+        if not isinstance(data, dict) or data.get("present") is not True:
+            return PasswordStepState(present=False, checking=False, error=None, hint=None)
+        label = _page_text(data.get("label"))
+        lang = data.get("lang")
+        english = not isinstance(lang, str) or not lang or lang.lower().startswith("en")
+        # A non-English UI renders a localized placeholder this driver cannot
+        # tell apart from a hint, so it reports no hint rather than a wrong one.
+        hint = label if english and label != _PASSWORD_PLACEHOLDER else None
+        return PasswordStepState(
+            present=True,
+            checking=data.get("checking") is True,
+            error=_page_text(data.get("error")),
+            hint=hint,
         )
 
     def is_logged_in(self) -> bool:

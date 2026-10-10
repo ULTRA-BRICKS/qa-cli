@@ -15,11 +15,13 @@ browser.auth_status() to detect both success and any Telegram auth substep
 this CLI cannot automate, reporting it distinctly instead of hanging
 silently until timeout -- except Telegram's cloud-password (2FA) step,
 `auth-password-form`, which IS handled: once it persists across the usual
-two-poll debounce, `_prompt_and_submit_password` prompts for it with
-`getpass.getpass` (masked, never echoed/logged/written anywhere) and submits
-it directly into the live page via `browser.submit_password`. The PNG
-screenshot is still written on every QR redraw for tooling that reads the
-file directly.
+two-poll debounce, `_handle_password_step` shows Telegram's password hint (if
+any), prompts with `getpass.getpass` (masked, never echoed/logged/written
+anywhere), submits into the live page via `browser.submit_password`, and then
+waits for Telegram's own verdict (`browser.password_state()`): spinner = still
+checking, error label = rejected (re-prompt, bounded attempts), form gone =
+accepted. The PNG screenshot is still written on every QR redraw for tooling
+that reads the file directly.
 """
 from __future__ import annotations
 
@@ -55,12 +57,15 @@ _QR_URL_PREFIX = "tg://login?token="
 
 _MANUAL_STEP_FALLBACK = "finish this step manually in a headed browser session, then re-run"
 
-# Telegram's cloud-password check is a network round trip (its own SRP
-# verification API call), not instant -- a single poll right after submit
-# would misreport a slow-but-correct password as rejected. Bounded so a
-# genuinely wrong password (or a submission that silently failed) is still
-# reported within a few seconds, never retried silently forever.
-_PASSWORD_CONFIRM_POLLS = 5
+# Telegram's verdict on a cloud password is read from its own UI, never
+# inferred from elapsed time: while the submit button spins the check is
+# still running (SRP proof, DC round trip, main-module load after success),
+# however long that takes within the login deadline. Each attempt needs the
+# user to type again; nothing is ever resubmitted automatically.
+_PASSWORD_MAX_ATTEMPTS = 3
+# Form present without spinner or error for this many consecutive polls
+# means the submit never reached Telegram's handler.
+_PASSWORD_IDLE_POLLS = 5
 _FIELD_CONFIRM_POLLS = 15
 _FIELD_CONFIRM_INTERVAL = 1.0
 
@@ -134,7 +139,13 @@ def _secure_getpass(prompt):
         return getpass.getpass(prompt)
 
 
-def _prompt_and_submit_password(browser: BrowserDriver, painter: _TerminalQrPainter) -> None:
+def _prompt_and_submit_password(
+    browser: BrowserDriver,
+    painter: _TerminalQrPainter,
+    hint: str | None,
+    rejection: str | None,
+    attempt: int,
+) -> None:
     """Prompt for Telegram's cloud password in the terminal (masked) and
     submit it into the live page.
 
@@ -143,10 +154,19 @@ def _prompt_and_submit_password(browser: BrowserDriver, painter: _TerminalQrPain
     `password` variable until it is handed to `browser.submit_password`,
     which itself sends it to agent-browser over subprocess stdin, never argv.
     """
-    painter.render(
+    lines = []
+    if rejection:
+        lines.append(
+            f"Telegram rejected the password: {rejection} "
+            f"(attempt {attempt} of {_PASSWORD_MAX_ATTEMPTS})."
+        )
+    lines.append(
         "Telegram requires the two-factor cloud password -- "
         "check this terminal for a masked password prompt."
     )
+    if hint:
+        lines.append(f"Hint: {hint}")
+    painter.render("\n".join(lines))
     try:
         password = _secure_getpass("Telegram cloud password (input hidden): ")
     except (EOFError, OSError, getpass.GetPassWarning) as exc:
@@ -163,20 +183,57 @@ def _prompt_and_submit_password(browser: BrowserDriver, painter: _TerminalQrPain
     browser.submit_password(password)
 
 
-def _confirm_password_step(browser: BrowserDriver, poll_interval: float) -> AuthStatus:
-    """After `browser.submit_password`, poll until `auth-password-form`
-    clears (success, or Telegram moved to a different next step) or it
-    persists across `_PASSWORD_CONFIRM_POLLS` polls, in which case the
-    password was rejected (or the submission silently failed).
+def _await_password_verdict(
+    browser: BrowserDriver, poll_interval: float, deadline: float
+) -> AuthStatus | str:
+    """Poll after a submit until Telegram decides: the form leaving
+    `auth-password-form` returns the new AuthStatus; Telegram's error text
+    (once its spinner has stopped, so the form accepts input again) is
+    returned as a string. Never decides "rejected" from elapsed time.
     """
-    for _ in range(_PASSWORD_CONFIRM_POLLS):
+    idle_polls = 0
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                "timed out while Telegram was still checking the cloud password "
+                f"(not reported as rejected) [{browser.diagnostic_dump()}]"
+            )
         time.sleep(poll_interval)
         status = browser.auth_status()
         if status.waiting_form != AUTH_PASSWORD_FORM_ID:
             return status
+        state = browser.password_state()
+        if state.checking or not state.present:
+            idle_polls = 0
+            continue
+        if state.error:
+            return state.error
+        idle_polls += 1
+        if idle_polls >= _PASSWORD_IDLE_POLLS:
+            raise AuthStepRequiredError(
+                "Telegram did not start checking the cloud password (the submit "
+                "was not registered); nothing was resubmitted. Re-run qa telegram login."
+            )
+
+
+def _handle_password_step(
+    browser: BrowserDriver, painter: _TerminalQrPainter, poll_interval: float, deadline: float
+) -> AuthStatus:
+    rejection = None
+    # Read before the first submit: after a rejection Telegram's single
+    # label shows the error text instead of the hint.
+    hint = browser.password_state().hint
+    for attempt in range(1, _PASSWORD_MAX_ATTEMPTS + 1):
+        _prompt_and_submit_password(browser, painter, hint, rejection, attempt)
+        verdict = _await_password_verdict(browser, poll_interval, deadline)
+        if isinstance(verdict, AuthStatus):
+            return verdict
+        rejection = verdict
     raise AuthPasswordRejectedError(
-        "Telegram rejected the password (or another step is required); re-run to try again"
+        f"Telegram rejected the password: {rejection} "
+        f"({_PASSWORD_MAX_ATTEMPTS} attempts); re-run qa telegram login to try again"
     )
+
 
 def _prompt_terminal_field(browser, painter, form, poll_interval=DEFAULT_POLL_INTERVAL):
     kind = 'code' if form == CODE_FORM else 'phone'
@@ -254,8 +311,7 @@ def _run_qr_login_loop(
                         continue
                     if status.waiting_form != AUTH_PASSWORD_FORM_ID:
                         raise AuthStepRequiredError(_describe_wait(status.waiting_form))
-                    _prompt_and_submit_password(browser, painter)
-                    status = _confirm_password_step(browser, poll_interval)
+                    status = _handle_password_step(browser, painter, poll_interval, deadline)
                     manual_form = None
                     manual_polls = 0
                     continue

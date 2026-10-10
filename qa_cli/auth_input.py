@@ -41,8 +41,12 @@ def submission_commands(kind: str, value: str) -> list[list[str]]:
             raise ValueError('Enter the phone number with +country code and digits only')
         form, selector = PHONE_FORM, '#sign-in-phone-number'
     elif kind == 'password':
-        if not value or len(value) > 4096:
+        if not value:
             raise ValueError('A nonempty cloud password is required')
+        # PasswordForm.tsx sets maxLength={256} (UTF-16 units): the browser
+        # would silently truncate a longer value into a guaranteed mismatch.
+        if len(value.encode('utf-16-le')) // 2 > 256:
+            raise ValueError('Telegram Web accepts at most 256 password characters')
         form, selector = PASSWORD_FORM, ':is(#sign-in-password,input[type="password"])'
     else:
         raise ValueError('Unsupported terminal authentication field')

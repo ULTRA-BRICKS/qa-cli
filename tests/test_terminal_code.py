@@ -2,7 +2,7 @@ import io
 import subprocess
 import pytest
 from qa_cli import telegram
-from qa_cli.browser import AgentBrowserDriver, AuthStatus, AuthStepRequiredError
+from qa_cli.browser import AgentBrowserDriver, AuthStatus, AuthStepRequiredError, PasswordStepState
 
 class CodeFlow:
     def __init__(self, password=False):
@@ -15,6 +15,7 @@ class CodeFlow:
         return AuthStatus(True, None)
     def submit_code(self, code): self.code = code
     def submit_password(self, password): self.password = password
+    def password_state(self): return PasswordStepState(self.password is None, False, None, None)
     def diagnostic_dump(self): return 'sanitized'
 
 def test_terminal_code_completes_without_browser_input(tmp_path, monkeypatch):

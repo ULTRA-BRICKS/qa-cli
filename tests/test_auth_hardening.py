@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from qa_cli.browser import AgentBrowserDriver, BrowserError, _AUTH_STATUS_JS
+from qa_cli.browser import AgentBrowserDriver, BrowserError, PasswordStepState, _AUTH_STATUS_JS
 from qa_cli.telegram import _TerminalQrPainter
 
 def test_blank_page_is_not_authenticated():
@@ -164,6 +164,7 @@ def test_password_step_prompts_masked_and_submits_to_page(tmp_path, monkeypatch)
         def wait_for_qr(self, timeout): pass
         def auth_status(self): return next(self.states)
         def submit_password(self, password): submitted.append(password)
+        def password_state(self): return PasswordStepState(True, False, None, None)
         states = iter([
             AuthStatus(False, "auth-password-form"),
             AuthStatus(False, "auth-password-form"),  # 2nd poll -> debounce triggers the prompt
@@ -197,13 +198,10 @@ def test_submit_password_sends_via_stdin_never_argv(monkeypatch):
     assert "PRIVATE_TEST_PASSWORD_XYZ" in kwargs["input"]
 
 
-# --- _SUBMIT_PASSWORD_JS (stubs Node's DOM; no Chromium) -------------------
-
 def test_password_step_survives_a_slow_correct_password_without_false_rejection(tmp_path, monkeypatch):
-    # Telegram's own password check is a network round trip: the form can
-    # legitimately stay mounted for a couple of polls after a CORRECT
-    # password before it clears. A single immediate poll must not
-    # misreport this as a rejection.
+    # Telegram's own password check is a network round trip: the form stays
+    # mounted (submit spinner up) after a CORRECT password until it clears.
+    # That must never be misreported as a rejection.
     from qa_cli.browser import AuthStatus
     from qa_cli.telegram import login
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
@@ -215,6 +213,7 @@ def test_password_step_survives_a_slow_correct_password_without_false_rejection(
         def is_logged_in(self): return False
         def wait_for_qr(self, timeout): pass
         def submit_password(self, password): pass
+        def password_state(self): return PasswordStepState(True, True, None, None)
         def auth_status(self): return next(self.states)
         states = iter([
             AuthStatus(False, "auth-password-form"),
@@ -233,7 +232,8 @@ def test_password_step_rejected_reports_clear_error_and_exits_nonzero(tmp_path, 
     from qa_cli.cli import main
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _: None)
-    monkeypatch.setattr("qa_cli.telegram.getpass.getpass", lambda *a, **k: "wrong-password")
+    prompts = []
+    monkeypatch.setattr("qa_cli.telegram.getpass.getpass", lambda *a, **k: prompts.append(1) or "wrong-password")
     monkeypatch.setattr("qa_cli.telegram._interactive_input_available", lambda: True)
     class Browser:
         def open(self, url): pass
@@ -241,11 +241,14 @@ def test_password_step_rejected_reports_clear_error_and_exits_nonzero(tmp_path, 
         def wait_for_qr(self, timeout): pass
         def submit_password(self, password): pass
         def auth_status(self): return AuthStatus(False, "auth-password-form")
+        def password_state(self): return PasswordStepState(True, False, "Invalid password, please try again", None)
     code = main(["telegram", "login"], browser=Browser())
     assert code == 1
     err = capsys.readouterr().err
     assert "rejected the password" in err
+    assert "Invalid password, please try again" in err
     assert "wrong-password" not in err
+    assert len(prompts) == 3  # bounded re-prompts, never an endless loop
 
 
 def test_password_step_no_tty_fails_clearly_instead_of_hanging(tmp_path, monkeypatch, capsys):
@@ -262,6 +265,7 @@ def test_password_step_no_tty_fails_clearly_instead_of_hanging(tmp_path, monkeyp
         def is_logged_in(self): return False
         def wait_for_qr(self, timeout): pass
         def auth_status(self): return AuthStatus(False, "auth-password-form")
+        def password_state(self): return PasswordStepState(True, False, None, None)
     code = main(["telegram", "login"], browser=Browser())
     assert code == 3
     err = capsys.readouterr().err

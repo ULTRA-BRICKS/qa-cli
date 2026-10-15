@@ -52,6 +52,8 @@ from qa_cli.auth_input import CODE_FORM, PHONE_FORM
 DEFAULT_LOGIN_TIMEOUT = 300.0
 DEFAULT_QR_WAIT_TIMEOUT = 60.0
 DEFAULT_POLL_INTERVAL = 1.0
+DEFAULT_STATUS_SETTLE_TIMEOUT = 20.0
+DEFAULT_STATUS_POLL_INTERVAL = 0.5
 
 _QR_URL_PREFIX = "tg://login?token="
 
@@ -357,10 +359,48 @@ def login(
     return 0
 
 
-def status(browser: BrowserDriver) -> int:
+def _session_state(auth: AuthStatus) -> str:
+    """A visible chat shell or auth form is a verdict; anything else is Web A still loading."""
+    if auth.logged_in:
+        return "logged-in"
+    if auth.waiting_form is not None:
+        return "logged-out"
+    return "unknown"
+
+
+def status(
+    browser: BrowserDriver,
+    timeout: float = DEFAULT_STATUS_SETTLE_TIMEOUT,
+    poll_interval: float = DEFAULT_STATUS_POLL_INTERVAL,
+) -> int:
+    # Right after open Web A shows neither the main shell nor an auth form yet, and that
+    # loading page reads as loggedIn:false, so one read would report logged-out.
     browser.open(TELEGRAM_WEB_URL)
-    state = "logged-in" if browser.is_logged_in() else "logged-out"
+    deadline = time.monotonic() + timeout
+    # The driver caps each page probe at the time left, so a slow last probe cannot overrun.
+    set_deadline = getattr(browser, "set_deadline", None)
+    if set_deadline:
+        set_deadline(deadline)
+    try:
+        while True:
+            state = _session_state(browser.auth_status())
+            # Stop unless a whole sleep still leaves time for the next probe; re-check after
+            # sleeping, since an overshooting sleep would start a probe past the deadline.
+            if state != "unknown" or deadline - time.monotonic() <= poll_interval:
+                break
+            time.sleep(poll_interval)
+            if time.monotonic() >= deadline:
+                break
+    finally:
+        if set_deadline:
+            set_deadline(None)
     print(state)
     print(f"session: {SESSION_NAME}")
     print(f"config: {config_dir()}")
+    if state == "unknown":
+        print(
+            f"error: Telegram Web showed neither chats nor a login form after ~{timeout:g}s of polling",
+            file=sys.stderr,
+        )
+        return 1
     return 0

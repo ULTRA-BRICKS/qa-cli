@@ -12,7 +12,11 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+
+import pytest
 
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,7 +24,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from qa_cli.browser import AgentBrowserDriver  # noqa: E402
-from qa_cli.chat import CHAT_SESSION_NAME, _js, run_chat_command  # noqa: E402
+from qa_cli.chat import CHAT_SESSION_NAME, _MESSAGES_JS, _TAG_MODAL_SEND_JS, _js, run_chat_command  # noqa: E402
 from qa_cli.cli import build_parser, main  # noqa: E402
 
 BOT = 8574086668
@@ -227,3 +231,163 @@ def test_read_after_returns_only_newer_messages():
     page = FakePage([msg(1, "a"), msg(2, "b"), msg(3, "c")])
     code, payload = run(page, "read", "--peer", str(BOT), "--after", "1", "--limit", "1")
     assert code == 0 and [m["id"] for m in payload["messages"]] == [3]
+
+
+# Minimal DOM for _TAG_MODAL_SEND_JS: #portals buttons, each with icon classes; hidden
+# buttons have no client rects. querySelector supports the comma list the script uses.
+_MODAL_SEND_HARNESS = """
+const spec = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+globalThis.getComputedStyle = () => ({display: 'block', visibility: 'visible', opacity: '1'});
+const buttons = spec.buttons.map((b) => ({
+  nodeType: 1, parentElement: null, attrs: {}, label: b.label,
+  getClientRects: () => (b.visible ? [{}] : []),
+  querySelector(sel) {
+    return sel.split(',').map((s) => s.trim().replace(/^\\./, '')).some((c) => b.icons.includes(c)) ? {} : null;
+  },
+  setAttribute(k, v) { this.attrs[k] = v; },
+  removeAttribute(k) { delete this.attrs[k]; },
+}));
+globalThis.document = {
+  querySelectorAll(sel) {
+    if (sel === '#portals button') return buttons;
+    if (sel === '[data-qa-target]') return buttons.filter((b) => 'data-qa-target' in b.attrs);
+    return [];
+  },
+};
+const result = JSON.parse(eval(spec.script));
+const tagged = buttons.filter((b) => b.attrs['data-qa-target'] === 'modal-send').map((b) => b.label);
+process.stdout.write(JSON.stringify({ok: result.ok, tagged}));
+"""
+
+
+def _tag_modal_send(buttons):
+    if not shutil.which("node"):
+        pytest.skip("node is required to run page scripts")
+    proc = subprocess.run(
+        ["node", "-e", _MODAL_SEND_HARNESS],
+        input=json.dumps({"script": _TAG_MODAL_SEND_JS, "buttons": buttons}),
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_modal_send_tags_web_a_new_send_icon():
+    result = _tag_modal_send([
+        {"label": "cancel", "icons": ["icon", "icon-close"], "visible": True},
+        {"label": "emoji", "icons": ["icon", "icon-smile"], "visible": True},
+        {"label": "send", "icons": ["icon", "icon-new-send"], "visible": True},
+    ])
+    assert result == {"ok": True, "tagged": ["send"]}
+
+
+def test_modal_send_still_tags_the_legacy_send_icon_and_skips_hidden_ones():
+    result = _tag_modal_send([
+        {"label": "hidden-send", "icons": ["icon", "icon-new-send"], "visible": False},
+        {"label": "send", "icons": ["icon", "icon-send"], "visible": True},
+    ])
+    assert result == {"ok": True, "tagged": ["send"]}
+
+
+# A tiny DOM for _MESSAGES_JS: nodes are {tag?, id?, cls?, attrs?, text?, children?};
+# selectors support comma lists, descendant combinators and compound tag/#id/.class/[attr]
+# parts — the subset the page script uses.
+_MESSAGES_HARNESS = """
+const spec = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const parseCompound = (s) => ({
+  tag: (s.match(/^[a-zA-Z]+/) || [null])[0],
+  id: (s.match(/#([\\w-]+)/) || [null, null])[1],
+  classes: [...s.matchAll(/\\.([\\w-]+)/g)].map((x) => x[1]),
+  attrs: [...s.matchAll(/\\[([\\w-]+)\\]/g)].map((x) => x[1]),
+});
+const matchesCompound = (el, c) => (!c.tag || el.tagName === c.tag.toUpperCase())
+  && (!c.id || el.id === c.id) && c.classes.every((k) => el.classList.contains(k))
+  && c.attrs.every((a) => a in el.attrs);
+const matchesComplex = (el, parts) => {
+  if (!matchesCompound(el, parts[parts.length - 1])) return false;
+  let rest = parts.slice(0, -1);
+  for (let p = el.parentElement; p && rest.length; p = p.parentElement) {
+    if (matchesCompound(p, rest[rest.length - 1])) rest = rest.slice(0, -1);
+  }
+  return rest.length === 0;
+};
+const matches = (el, sel) => sel.split(',').some((s) => matchesComplex(el, s.trim().split(/\\s+/).map(parseCompound)));
+function build(node, parent) {
+  const cls = (node.cls || '').split(/\\s+/).filter(Boolean);
+  const el = {
+    tagName: (node.tag || 'div').toUpperCase(), id: node.id || '', attrs: node.attrs || {},
+    className: cls.join(' '), parentElement: parent, children: [],
+    classList: {contains: (k) => cls.includes(k)},
+    get dataset() { return {messageId: this.attrs['data-message-id']}; },
+    get textContent() { return (node.text || '') + this.children.map((c) => c.textContent).join(''); },
+    get innerText() { return this.textContent; },
+    getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+    closest(sel) { for (let n = this; n; n = n.parentElement) if (matches(n, sel)) return n; return null; },
+    querySelectorAll(sel) {
+      const out = [];
+      const walk = (n) => n.children.forEach((c) => { if (matches(c, sel)) out.push(c); walk(c); });
+      walk(this);
+      return out;
+    },
+    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; },
+  };
+  el.children = (node.children || []).map((c) => build(c, el));
+  return el;
+}
+const root = build(spec.tree, null);
+globalThis.document = {querySelectorAll: (sel) => root.querySelectorAll(sel)};
+process.stdout.write(eval(spec.script));
+"""
+
+
+def _message(id_, *content, bubble="", outside=()):
+    """One rendered Web A message: its bubble (.message-content) plus elements outside it."""
+    return {"cls": "Message own", "attrs": {"data-message-id": str(id_)}, "children": [
+        {"cls": "message-content-wrapper", "children": [
+            {"cls": f"message-content {bubble}", "children": list(content)},
+            *outside,
+        ]},
+    ]}
+
+
+def _preview(*children):
+    return {"cls": "EmbeddedMessage", "children": list(children)}
+
+
+def _render_messages(*messages):
+    if not shutil.which("node"):
+        pytest.skip("node is required to run page scripts")
+    tree = {"children": [{"id": "MiddleColumn", "children": list(messages)}]}
+    proc = subprocess.run(
+        ["node", "-e", _MESSAGES_HARNESS],
+        input=json.dumps({"script": _js(_MESSAGES_JS, AFTER=None), "tree": tree}),
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return {m["id"]: m for m in json.loads(proc.stdout)}
+
+
+def test_messages_classify_current_web_a_photos_and_ignore_reply_previews():
+    rendered = _render_messages(
+        _message(1, {"cls": "media-inner", "children": [{"tag": "img", "cls": "full-media"}]}, bubble="media"),
+        _message(2, _preview({"cls": "message-content media", "children": [{"cls": "media-inner"}]}),
+                 {"cls": "text-content", "text": "nice photo"}),
+        _message(3, _preview({"cls": "Audio voice"}), {"cls": "text-content", "text": "re voice"}),
+        _message(4, _preview({"cls": "File"}), {"cls": "text-content", "text": "re file"}),
+        _message(5, {"cls": "Audio voice"}),
+    )
+    assert {i: m["kind"] for i, m in rendered.items()} == {
+        1: "media", 2: "text", 3: "text", 4: "text", 5: "voice",
+    }
+
+
+def test_messages_report_inline_keys_but_not_reactions_outside_the_bubble():
+    rendered = _render_messages(
+        _message(1, {"cls": "text-content", "text": "card"}, outside=(
+            {"cls": "InlineButtons", "children": [{"tag": "button", "cls": "Button", "text": "Yes"}]},
+            {"cls": "Reactions is-outside", "children": [
+                {"tag": "button", "cls": "Button message-reaction", "text": "E"},
+            ]},
+        )),
+    )
+    assert rendered[1]["buttons"] == ["Yes"]

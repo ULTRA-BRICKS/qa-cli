@@ -71,10 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser.add_argument("--phone", action="store_true", help="Use phone-number login and enter its verification code in the terminal")
     tg_sub.add_parser(
         "status",
-        help="Print logged-in or logged-out from the persisted session",
+        help="Print logged-in, logged-out or unknown from the persisted session",
         description=(
             "Report Telegram Web session state without opening Telegram.app. "
-            "Uses the persisted agent-browser session qa-telegram."
+            "Uses the persisted agent-browser session qa-telegram. Once the page "
+            "opens, polls for about 20s until Telegram Web shows its chats "
+            "(logged-in) or a login form (logged-out); if neither, prints unknown and exits 1."
         ),
     )
     probe = tg_sub.add_parser(

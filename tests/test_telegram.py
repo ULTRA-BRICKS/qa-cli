@@ -11,6 +11,7 @@ never send chat messages.
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import os
 import subprocess
@@ -348,7 +349,7 @@ def test_status_logged_out_without_session(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
-    fake = FakeBrowserDriver(logged_in=False)
+    fake = FakeBrowserDriver(logged_in=False, waiting_form="auth-qr-form")
     code = main(["telegram", "status"], browser=fake)
     assert code == 0
     out = capsys.readouterr().out
@@ -366,6 +367,56 @@ def test_status_logged_in_when_fake_says_so(
     out = capsys.readouterr().out
     assert "logged-in" in out
     assert "qa-telegram" in out
+
+class _LoadingThenStatus:
+    """Web A right after open: `loading_polls` auth_status reads with neither shell nor form."""
+
+    def __init__(self, loading_polls: int, final: AuthStatus) -> None:
+        self.loading_polls = loading_polls
+        self.final = final
+        self.polls = 0
+
+    def open(self, url: str) -> None:
+        pass
+
+    def auth_status(self) -> AuthStatus:
+        self.polls += 1
+        if self.polls <= self.loading_polls:
+            return AuthStatus(logged_in=False, waiting_form=None)
+        return self.final
+
+def test_status_waits_for_web_a_to_finish_loading(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    fake = _LoadingThenStatus(3, AuthStatus(logged_in=True, waiting_form=None))
+    code = main(["telegram", "status"], browser=fake)
+    assert code == 0
+    assert capsys.readouterr().out.splitlines()[0] == "logged-in"
+    assert fake.polls == 4
+
+def test_status_never_settling_is_unknown_not_logged_out(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("qa_cli.telegram.time.sleep", lambda _s: None)
+    clock = itertools.count(0.0, 5.0)
+    monkeypatch.setattr("qa_cli.telegram.time.monotonic", lambda: next(clock))
+    fake = _LoadingThenStatus(100, AuthStatus(logged_in=True, waiting_form=None))
+    deadlines: list = []
+    fake.set_deadline = deadlines.append
+    code = main(["telegram", "status"], browser=fake)
+    assert code == 1
+    captured = capsys.readouterr()
+    assert captured.out.splitlines()[0] == "unknown"
+    assert "logged-out" not in captured.out
+    assert "neither chats nor a login form" in captured.err
+    # Clock reads 0 (deadline 20), then probe at 0, 5 left-check, 10 after-sleep, probe,
+    # 15 left-check, 20 after-sleep: no probe starts at or past the deadline, every probe
+    # runs under the driver deadline, which is cleared afterwards.
+    assert fake.polls == 2
+    assert deadlines == [20.0, None]
 
 def test_missing_agent_browser_exits_127(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

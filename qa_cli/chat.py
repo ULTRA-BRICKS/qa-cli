@@ -127,8 +127,9 @@ _VIS = """const vis = (e) => {
 
 # Inline keyboard buttons: Web A renders them (CSS-module class names) next to,
 # not inside, .message-content; buttons inside it are media/player controls.
+# Reactions shown outside the bubble (.Reactions.is-outside) are buttons there too, not keys.
 _KEYBOARD = """const keyboard = (m) => Array.from(m.querySelectorAll('.message-content-wrapper button'))
-    .filter((b) => !b.closest('.message-content') && !b.closest('.quick-reaction'));"""
+    .filter((b) => !b.closest('.message-content') && !b.closest('.quick-reaction') && !b.closest('.Reactions'));"""
 
 _STATE_JS = """(() => {
   VIS
@@ -209,9 +210,14 @@ _MESSAGES_JS = """(() => {
     const icon = st ? String(st.className) : '';
     const status = /icon-message-(\\w+)/.test(icon) ? icon.match(/icon-message-(\\w+)/)[1]
       : /icon-check/.test(icon) ? 'succeeded' : null;
-    const audio = m.querySelector('.Audio');
+    // A reply preview (.EmbeddedMessage) reuses .Audio/.File/.media-inner for the quoted
+    // message, so only elements outside it describe this message.
+    const own = (sel) => Array.from(m.querySelectorAll(sel)).find((e) => !e.closest('.EmbeddedMessage'));
+    const audio = own('.Audio');
+    // Current Web A renders photos/videos as .media-inner in a .message-content.media bubble.
     const kind = audio ? (/voice/i.test(audio.className) ? 'voice' : 'audio')
-      : m.querySelector('.File') ? 'document' : m.querySelector('.Photo, .Video') ? 'media' : 'text';
+      : own('.File') ? 'document'
+      : own('.Photo, .Video, .message-content.media .media-inner') ? 'media' : 'text';
     const reply = m.querySelector('.EmbeddedMessage');
     out.push({
       id, out: m.classList.contains('own'), text: clean(m.querySelector('.text-content')),
@@ -289,7 +295,8 @@ _PASTE_FILE_JS = """(() => {
 _TAG_MODAL_SEND_JS = """(() => {
   VIS
   document.querySelectorAll('[data-qa-target]').forEach((e) => e.removeAttribute('data-qa-target'));
-  const send = Array.from(document.querySelectorAll('#portals button')).find((b) => vis(b) && b.querySelector('.icon-send'));
+  // Web A renamed the modal send glyph from icon-send to icon-new-send (2026-10).
+  const send = Array.from(document.querySelectorAll('#portals button')).find((b) => vis(b) && b.querySelector('.icon-send, .icon-new-send'));
   if (!send) return JSON.stringify({ok: false});
   send.setAttribute('data-qa-target', 'modal-send');
   return JSON.stringify({ok: true});

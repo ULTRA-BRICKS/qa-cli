@@ -34,8 +34,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import qrcode
-
 from qa_cli.browser import (
     SESSION_NAME,
     TELEGRAM_WEB_URL,
@@ -85,6 +83,8 @@ def qr_path() -> Path:
 
 def render_qr_ascii(data: str) -> str:
     """Render `data` as a terminal-friendly Unicode QR code block."""
+    import qrcode  # lazy: only the login QR path needs it; `status` must work without it
+
     qr = qrcode.QRCode(border=4)
     qr.add_data(data)
     qr.make(fit=True)

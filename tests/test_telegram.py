@@ -357,6 +357,20 @@ def test_status_logged_out_without_session(
     assert "qa-telegram" in out
     assert not any(c[0] == "wait_for_qr" for c in fake.calls)
 
+def test_status_works_without_qrcode_installed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "qrcode", None)  # `import qrcode` -> ImportError
+    import qa_cli
+
+    monkeypatch.setattr(qa_cli, "telegram", sys.modules["qa_cli.telegram"])  # restored on teardown
+    monkeypatch.delitem(sys.modules, "qa_cli.telegram")  # force a fresh import in status
+    fake = FakeBrowserDriver(logged_in=False, waiting_form="auth-qr-form")
+    code = main(["telegram", "status"], browser=fake)
+    assert code == 0
+    assert "logged-out" in capsys.readouterr().out
+
 def test_status_logged_in_when_fake_says_so(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

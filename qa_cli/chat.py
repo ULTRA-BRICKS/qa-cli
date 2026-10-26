@@ -131,24 +131,37 @@ _VIS = """const vis = (e) => {
 _KEYBOARD = """const keyboard = (m) => Array.from(m.querySelectorAll('.message-content-wrapper button'))
     .filter((b) => !b.closest('.message-content') && !b.closest('.quick-reaction') && !b.closest('.Reactions'));"""
 
+# Web A's START button for a bot chat this account never started; it replaces the
+# composer in the chat footer. Labels per UI language.
+_START_BUTTON = """const startButton = () => Array.from(document.querySelectorAll('#MiddleColumn .middle-column-footer button'))
+    .find((b) => vis(b) && /^(start|старт|запустить|начать)$/i.test((b.textContent || '').trim()));"""
+
+# The header's own title and status elements: with an initials avatar (no photo) the
+# avatar letters are the first line of the header's text, so its lines can't be trusted.
 _STATE_JS = """(() => {
   VIS
+  START_BUTTON
   const onWeb = location.origin === 'https://web.telegram.org' && location.pathname.startsWith('/a/');
   const authForm = Array.from(document.querySelectorAll('[id^="auth-"][id$="-form"]')).some(vis);
   const shell = vis(document.querySelector('#LeftColumn, #Main'));
   const header = document.querySelector('.MiddleHeader');
-  const lines = vis(header) ? header.innerText.split('\\n').map((s) => s.trim()).filter(Boolean) : [];
+  const text = (sel) => {
+    const e = vis(header) ? header.querySelector(sel) : null;
+    return e ? (e.textContent || '').trim() || null : null;
+  };
+  const title = text('.ChatInfo .info .title');
+  const subtitle = text('.ChatInfo .info .status');
   const composer = document.querySelector('#editable-message-text');
   const bottom = Array.from(document.querySelectorAll('#MiddleColumn button')).some(
     (b) => vis(b) && /bottom/i.test(b.getAttribute('aria-label') || ''));
   return JSON.stringify({
     onWeb, authForm, loggedIn: shell && !authForm,
-    open: location.hash === '#' + __PEER__ && lines.length > 0,
-    title: lines[0] || null, subtitle: lines[1] || null,
-    composer: vis(composer), draft: composer ? composer.textContent.length : 0,
+    open: location.hash === '#' + __PEER__ && title !== null,
+    title, subtitle,
+    composer: vis(composer), startButton: !!startButton(), draft: composer ? composer.textContent.length : 0,
     bottomButton: bottom,
   });
-})()""".replace("VIS", _VIS)
+})()""".replace("VIS", _VIS).replace("START_BUTTON", _START_BUTTON)
 
 # Tag (data-qa-target) the element a real click should hit: the peer's chat
 # list entry, else its search result (never a message search hit, which
@@ -172,6 +185,17 @@ _TAG_PEER_JS = """(() => {
   if (avatar) { avatar.closest('.ListItem-button').setAttribute('data-qa-target', 'peer'); return JSON.stringify({found: 'search'}); }
   return JSON.stringify({found: null});
 })()""".replace("VIS", _VIS)
+
+_TAG_START_JS = """(() => {
+  VIS
+  START_BUTTON
+  document.querySelectorAll('[data-qa-target]').forEach((e) => e.removeAttribute('data-qa-target'));
+  // Only this peer's chat: the page may have navigated since the state probe.
+  const b = location.hash === '#' + __PEER__ ? startButton() : null;
+  if (!b) return JSON.stringify({ok: false});
+  b.setAttribute('data-qa-target', 'start');
+  return JSON.stringify({ok: true});
+})()""".replace("VIS", _VIS).replace("START_BUTTON", _START_BUTTON)
 
 _SCROLL_BOTTOM_JS = """(() => {
   VIS
@@ -421,18 +445,25 @@ class TelegramChat:
             state = self.state()
         return state
 
+    @staticmethod
+    def _is_bot(state: dict) -> bool:
+        return (state.get("subtitle") or "").strip().lower() in _BOT_SUBTITLES
+
     def _require_bot(self, state: dict) -> None:
-        subtitle = (state.get("subtitle") or "").strip().lower()
-        if not self.allow_non_bot and subtitle not in _BOT_SUBTITLES:
+        if not self.allow_non_bot and not self._is_bot(state):
             raise ChatGuardError(
                 f"refusing to write: chat {self.peer} header does not identify a bot "
                 f"(subtitle {state.get('subtitle')!r}); pass --allow-non-bot to override"
             )
 
-    def _require_writable(self) -> dict:
-        state = self.open()
+    def _require_writable(self, state: Optional[dict] = None) -> dict:
+        state = state if state is not None else self.open()
         self._require_bot(state)
         if not state.get("composer"):
+            if state.get("startButton"):
+                raise ChatGuardError(
+                    f"the bot chat {self.peer} has not been started; send /start first"
+                )
             raise ChatError("the message composer is not available in this chat")
         if state.get("draft"):
             raise ChatGuardError(
@@ -544,10 +575,24 @@ class TelegramChat:
 
         return self._poll(probe, _CONFIRM_TIMEOUT, f"the {what} to be confirmed by Telegram")
 
+    def _press_start(self) -> ChatMessage:
+        """Click Web A's START button: for a bot it sends the same /start message."""
+        before = self.last_id()
+        if not (self.driver.eval_json(_js(_TAG_START_JS, PEER=str(self.peer))) or {}).get("ok"):
+            raise ChatError("the START button disappeared before it could be clicked")
+        self.driver.batch([["click", '[data-qa-target="start"]']])
+        return self._confirm_own(before, lambda m: normalize(m.text) == "/start", "sent /start")
+
     def send_text(self, text: str, reply_to: Optional[int] = None) -> ChatMessage:
         if not text.strip() or "\n" in text:
             raise ChatGuardError("text must be one non-empty line")
-        self._require_writable()
+        state = self.open()
+        # START is for bots only, even under allow_non_bot: that override widens where
+        # typing is allowed, never what a button click may start.
+        if (text == "/start" and reply_to is None and not state.get("composer")
+                and state.get("startButton") and self._is_bot(state)):
+            return self._press_start()
+        self._require_writable(state)
         before = self.last_id()
         if reply_to is not None:
             self._start_reply(reply_to)

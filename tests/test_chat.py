@@ -24,7 +24,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from qa_cli.browser import AgentBrowserDriver  # noqa: E402
-from qa_cli.chat import CHAT_SESSION_NAME, _MESSAGES_JS, _TAG_MODAL_SEND_JS, _js, run_chat_command  # noqa: E402
+from qa_cli.chat import CHAT_SESSION_NAME, _MESSAGES_JS, _STATE_JS, _TAG_MODAL_SEND_JS, _js, run_chat_command  # noqa: E402
 from qa_cli.cli import build_parser, main  # noqa: E402
 
 BOT = 8574086668
@@ -38,9 +38,13 @@ def msg(id_, text, out=False, status=None, buttons=(), kind="text"):
 class FakePage:
     """Answers the chat module's page scripts from a small in-memory model."""
 
-    def __init__(self, messages=(), subtitle="bot", draft=0, logged_in=True, on_send=None):
+    def __init__(self, messages=(), subtitle="bot", draft=0, logged_in=True, on_send=None,
+                 composer=True, start_button=False, on_start=None):
         self.messages = list(messages)
         self.subtitle = subtitle
+        self.composer = composer
+        self.start_button = start_button
+        self.on_start = on_start  # called with (page) when START is clicked
         self.draft = draft
         self.logged_in = logged_in
         self.opened = True
@@ -63,11 +67,14 @@ class FakePage:
         if "onWeb" in js:
             return {"onWeb": True, "authForm": not self.logged_in, "loggedIn": self.logged_in,
                     "open": self.opened, "title": "Claude", "subtitle": self.subtitle,
-                    "composer": True, "draft": self.draft, "bottomButton": False}
+                    "composer": self.composer, "startButton": self.start_button,
+                    "draft": self.draft, "bottomButton": False}
         if "const after = " in js:
             after = re.search(r"const after = (null|\d+);", js).group(1)
             floor = -1 if after == "null" else int(after)
             return [m for m in self.messages if m["id"] > floor]
+        if "'start'" in js:
+            return {"ok": self.start_button}
         if "'button'" in js:
             label = json.loads(re.search(r"const want = norm\((.*?)\);", js).group(1))
             target = int(json.loads(re.search(r'data-message-id="\' \+ (".*?") \+', js).group(1)))
@@ -83,6 +90,8 @@ class FakePage:
 
     def batch(self, commands):
         self.batches.append(commands)
+        if ["click", '[data-qa-target="start"]'] in commands and self.on_start:
+            self.on_start(self)
         typed = [c[2] for c in commands if c[:2] == ["keyboard", "inserttext"]]
         if typed and ["press", "Enter"] in commands and self.on_send:
             self.on_send(self, typed[0])
@@ -298,11 +307,15 @@ const parseCompound = (s) => ({
   tag: (s.match(/^[a-zA-Z]+/) || [null])[0],
   id: (s.match(/#([\\w-]+)/) || [null, null])[1],
   classes: [...s.matchAll(/\\.([\\w-]+)/g)].map((x) => x[1]),
-  attrs: [...s.matchAll(/\\[([\\w-]+)\\]/g)].map((x) => x[1]),
+  attrs: [...s.matchAll(/\\[([\\w-]+)(?:([\\^$]?)="([^"]*)")?\\]/g)].map((x) => ({name: x[1], op: x[2] || '', value: x[3]})),
 });
 const matchesCompound = (el, c) => (!c.tag || el.tagName === c.tag.toUpperCase())
   && (!c.id || el.id === c.id) && c.classes.every((k) => el.classList.contains(k))
-  && c.attrs.every((a) => a in el.attrs);
+  && c.attrs.every((a) => {
+    const v = a.name === 'id' ? el.id : el.attrs[a.name];
+    if (v === undefined) return false;
+    return a.op === '^' ? v.startsWith(a.value) : a.op === '$' ? v.endsWith(a.value) : true;
+  });
 const matchesComplex = (el, parts) => {
   if (!matchesCompound(el, parts[parts.length - 1])) return false;
   let rest = parts.slice(0, -1);
@@ -330,12 +343,18 @@ function build(node, parent) {
       return out;
     },
     querySelector(sel) { return this.querySelectorAll(sel)[0] || null; },
+    getClientRects() { return [{}]; },
   };
   el.children = (node.children || []).map((c) => build(c, el));
   return el;
 }
 const root = build(spec.tree, null);
-globalThis.document = {querySelectorAll: (sel) => root.querySelectorAll(sel)};
+globalThis.getComputedStyle = () => ({display: 'block', visibility: 'visible', opacity: '1'});
+globalThis.location = spec.location || {origin: '', pathname: '', hash: ''};
+globalThis.document = {
+  querySelectorAll: (sel) => root.querySelectorAll(sel),
+  querySelector: (sel) => root.querySelector(sel),
+};
 process.stdout.write(eval(spec.script));
 """
 
@@ -391,3 +410,130 @@ def test_messages_report_inline_keys_but_not_reactions_outside_the_bubble():
         )),
     )
     assert rendered[1]["buttons"] == ["Yes"]
+
+
+# -- header: title/subtitle come from the header's own elements, not avatar initials ----------
+
+def _header(*, avatar_letters="HS", name="HyperCalendar Stage", status="bot"):
+    """Web A's .MiddleHeader for an initials avatar (no photo): the avatar's letters come
+    first in the header's text, then the chat name, then the status line."""
+    return {"cls": "MiddleHeader", "children": [{"cls": "ChatInfo", "children": [
+        {"cls": "Avatar no-photo", "children": [
+            {"cls": "inner", "children": [{"tag": "span", "cls": "letters", "text": avatar_letters}]},
+        ]},
+        {"cls": "info", "children": [
+            {"cls": "title", "children": [{"tag": "h3", "cls": "fullName", "text": name}]},
+            *([{"tag": "span", "cls": "status", "children": [
+                {"tag": "span", "cls": "user-status", "text": status}]}] if status else []),
+        ]},
+    ]}]}
+
+
+def _footer(*, composer=False, start=False):
+    kids = []
+    if composer:
+        kids.append({"id": "editable-message-text", "text": ""})
+    if start:
+        kids.append({"tag": "button", "cls": "Button primary fluid", "text": "START"})
+    return {"cls": "middle-column-footer", "children": kids}
+
+
+def _read_state(header, footer, peer=BOT):
+    if not shutil.which("node"):
+        pytest.skip("node is required to run page scripts")
+    tree = {"children": [
+        {"id": "Main", "children": [
+            {"id": "MiddleColumn", "children": [header, footer]},
+        ]},
+    ]}
+    location = {"origin": "https://web.telegram.org", "pathname": "/a/", "hash": f"#{peer}"}
+    proc = subprocess.run(
+        ["node", "-e", _MESSAGES_HARNESS],
+        input=json.dumps({"script": _js(_STATE_JS, PEER=str(peer)), "tree": tree, "location": location}),
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_state_reads_title_and_subtitle_from_header_elements_not_avatar_initials():
+    state = _read_state(_header(), _footer(composer=True))
+    assert state["open"] is True
+    assert (state["title"], state["subtitle"]) == ("HyperCalendar Stage", "bot")
+
+
+def test_state_keeps_a_non_bot_subtitle_for_an_initials_avatar_header():
+    state = _read_state(_header(status="last seen recently"), _footer(composer=True))
+    assert (state["title"], state["subtitle"]) == ("HyperCalendar Stage", "last seen recently")
+
+
+def test_state_reports_start_button_when_the_composer_is_replaced_by_it():
+    state = _read_state(_header(), _footer(start=True))
+    assert state["composer"] is False and state["startButton"] is True
+    state = _read_state(_header(), _footer(composer=True))
+    assert state["composer"] is True and state["startButton"] is False
+
+
+# -- never-started bot chat: START button instead of the composer ------------------------------
+
+START_CLICK = ["click", '[data-qa-target="start"]']
+
+
+def _starting_page(**kwargs):
+    def press_start(page):
+        page.start_button = False
+        page.composer = True
+        page.messages.append(msg(7, "/start", out=True, status="read"))
+
+    return FakePage([msg(3, "older")], composer=False, start_button=True, on_start=press_start, **kwargs)
+
+
+def _clicked_start(page):
+    return any(START_CLICK in batch for batch in page.batches)
+
+
+def test_send_start_clicks_the_start_button_in_a_bot_chat_and_returns_the_confirmed_message():
+    page = _starting_page()
+    code, payload = run(page, "send", "--peer", str(BOT), "--text", "/start")
+    assert code == 0, payload
+    assert payload["message"]["id"] == 7 and payload["message"]["text"] == "/start"
+    assert _clicked_start(page)
+    assert typed_texts(page) == []
+
+
+def test_send_other_text_in_an_unstarted_bot_chat_is_refused_without_clicking():
+    page = _starting_page()
+    code, payload = run(page, "send", "--peer", str(BOT), "--text", "hello")
+    assert code == 2 and "has not been started" in payload["error"] and "/start" in payload["error"]
+    assert not _clicked_start(page)
+    assert typed_texts(page) == []
+
+
+def test_send_start_with_arguments_is_not_the_start_button():
+    page = _starting_page()
+    code, payload = run(page, "send", "--peer", str(BOT), "--text", "/start payload")
+    assert code == 2 and "has not been started" in payload["error"]
+    assert not _clicked_start(page)
+
+
+def test_start_is_never_clicked_in_a_non_bot_chat():
+    page = _starting_page(subtitle="last seen recently")
+    code, payload = run(page, "send", "--peer", str(BOT), "--text", "/start")
+    assert code == 2 and "not identify a bot" in payload["error"]
+    assert not _clicked_start(page)
+
+
+def test_send_start_reports_a_start_that_telegram_failed_to_deliver():
+    def fail(page):
+        page.messages.append(msg(7, "/start", out=True, status="failed"))
+
+    page = FakePage(composer=False, start_button=True, on_start=fail)
+    code, payload = run(page, "send", "--peer", str(BOT), "--text", "/start")
+    assert code == 1 and "failed" in payload["error"]
+
+
+def test_start_is_never_clicked_in_a_non_bot_chat_even_with_allow_non_bot():
+    page = _starting_page(subtitle="last seen recently")
+    code, payload = run(page, "send", "--peer", str(BOT), "--text", "/start", "--allow-non-bot")
+    assert code == 2 and "has not been started" in payload["error"]
+    assert not _clicked_start(page)

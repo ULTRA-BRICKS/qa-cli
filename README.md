@@ -89,7 +89,10 @@ draft (a draft is the account owner's cloud-synced text). Typed text
 travels through agent-browser's stdin, never argv. Replies use the message
 context menu; files are pasted into the composer (an audio file is sent as
 audio). Text matching is NFKC-normalized, so bot names styled with Unicode
-math letters match plain ASCII.
+math letters match plain ASCII. A bot chat this account never started shows Web A's
+START button instead of the composer: `send --text /start` (exactly) clicks it and
+returns the confirmed `/start` message; any other text is refused (exit 2) until
+the chat is started. START is never clicked in a non-bot chat.
 
 Caveats: message ids are this account's ids — in a private chat a bot sees
 different ids for the same messages, so correlate by content markers. Opening

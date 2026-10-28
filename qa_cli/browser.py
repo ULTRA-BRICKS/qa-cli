@@ -382,7 +382,7 @@ class AgentBrowserDriver:
         return min(base, remaining)
 
     def _invoke(
-        self, argv: list[str], timeout: float, input_text: Optional[str] = None
+        self, argv: list[str], timeout: float, subcommand: str, input_text: Optional[str] = None
     ) -> subprocess.CompletedProcess[str]:
         try:
             proc = subprocess.run(
@@ -399,14 +399,14 @@ class AgentBrowserDriver:
                 if phrase in diagnostic:
                     category = label
                     break
-            raise BrowserError(f"agent-browser {category} (exit {proc.returncode}); inspect locally, no page data logged")
+            raise BrowserError(f"agent-browser {category} on '{subcommand}' (exit {proc.returncode}); inspect locally, no page data logged")
         return proc
 
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         argv = self.build_argv(*args)
         base_timeout = _NAVIGATION_TIMEOUT_SECONDS if args and args[0] == "open" else _SUBPROCESS_TIMEOUT_SECONDS
         timeout = self._resolve_timeout(base_timeout)
-        return self._invoke(argv, timeout)
+        return self._invoke(argv, timeout, args[0])
 
     def _run_stdin(self, *args: str, input_text: str) -> subprocess.CompletedProcess[str]:
         """Like `_run`, but pipes `input_text` to the agent-browser
@@ -418,7 +418,7 @@ class AgentBrowserDriver:
         """
         argv = self.build_argv(*args)
         timeout = self._resolve_timeout(_SUBPROCESS_TIMEOUT_SECONDS)
-        return self._invoke(argv, timeout, input_text=input_text)
+        return self._invoke(argv, timeout, args[0], input_text=input_text)
 
     def set_deadline(self, deadline: Optional[float]) -> None:
         self._deadline = deadline

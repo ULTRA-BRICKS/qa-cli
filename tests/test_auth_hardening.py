@@ -113,6 +113,16 @@ def test_browser_nonzero_error_never_discloses_payload(monkeypatch):
     assert "PRIVATE" not in str(error.value)
 
 
+@pytest.mark.parametrize("subcommand,argument", [("eval", "PRIVATE_JS"), ("open", "https://PRIVATE.example/x")])
+def test_browser_nonzero_error_names_subcommand_only(monkeypatch, subcommand, argument):
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "PRIVATE_RESPONSE", "PRIVATE_ERROR"))
+    with pytest.raises(BrowserError) as error:
+        AgentBrowserDriver(binary="fake")._run(subcommand, argument)
+    message = str(error.value)
+    assert f"'{subcommand}'" in message
+    assert "PRIVATE" not in message
+
+
 def test_invalid_hook_token_is_not_rendered(monkeypatch):
     driver=AgentBrowserDriver(binary="fake")
     monkeypatch.setattr(driver,"_eval_json",lambda script:{"token":"secret\n<script>"})

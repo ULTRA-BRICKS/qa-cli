@@ -186,6 +186,12 @@ _TAG_PEER_JS = """(() => {
   return JSON.stringify({found: null});
 })()""".replace("VIS", _VIS)
 
+# Metadata only (never the typed value): is the search box there, and is it empty.
+_SEARCH_INPUT_STATE_JS = """(() => {
+  const input = document.querySelector('#telegram-search-input');
+  return JSON.stringify({present: !!input, length: input ? input.value.length : 0});
+})()"""
+
 _TAG_START_JS = """(() => {
   VIS
   START_BUTTON
@@ -403,6 +409,38 @@ class TelegramChat:
             raise NotLoggedInError("Telegram Web is not logged in; run: qa telegram login")
         return state
 
+    def _search_probe(self, tag_peer: Callable[[], Optional[object]]) -> Callable[[], Optional[object]]:
+        requeried = False
+
+        def probe():
+            # Web A may clear a query typed into a cold session; re-enter it once.
+            nonlocal requeried
+            found = tag_peer()
+            if found or requeried:
+                return found
+            box = self.driver.eval_json(_SEARCH_INPUT_STATE_JS) or {}
+            if box.get("present") and box.get("length") == 0:
+                requeried = True
+                self.driver.batch([["click", _SEARCH_INPUT], ["fill", _SEARCH_INPUT, self.username]])
+            return found
+
+        return probe
+
+    def _locate_peer(self, tag_peer: Callable[[], Optional[object]]) -> None:
+        """Tag the peer's chat-list entry, else its username search result."""
+        try:
+            # A just-loaded shell renders its chat list a moment later.
+            found = self._poll(tag_peer, 5.0, f"chat {self.peer} in the chat list")
+        except ChatTimeoutError:
+            found = None
+        if not found and self.username:
+            self.driver.batch([["click", _SEARCH_INPUT], ["keyboard", "inserttext", self.username]])
+            found = self._poll(self._search_probe(tag_peer), 10.0, f"search result for @{self.username}")
+        if not found:
+            raise ChatError(
+                f"chat {self.peer} is not in the visible chat list; pass --username to find it via search"
+            )
+
     def open(self) -> dict:
         """Open the peer's chat (no reload when already open) at its latest message."""
         state = self._ensure_web()
@@ -410,18 +448,7 @@ class TelegramChat:
             # Room for long bot cards and readable proof screenshots.
             self.driver.batch([["set", "viewport", "1280", "1000"]])
             tag_peer = lambda: (self.driver.eval_json(_js(_TAG_PEER_JS, PEER=str(self.peer))) or {}).get("found")
-            try:
-                # A just-loaded shell renders its chat list a moment later.
-                found = self._poll(tag_peer, 5.0, f"chat {self.peer} in the chat list")
-            except ChatTimeoutError:
-                found = None
-            if not found and self.username:
-                self.driver.batch([["click", _SEARCH_INPUT], ["keyboard", "inserttext", self.username]])
-                found = self._poll(tag_peer, 10.0, f"search result for @{self.username}")
-            if not found:
-                raise ChatError(
-                    f"chat {self.peer} is not in the visible chat list; pass --username to find it via search"
-                )
+            self._locate_peer(tag_peer)
             is_open = lambda: (lambda s: s if s.get("open") else None)(self.state())
             self.driver.batch([["click", '[data-qa-target="peer"]']])
             try:
@@ -639,6 +666,56 @@ def _emit(payload: dict, out) -> None:
     print(json.dumps(payload, ensure_ascii=False), file=out)
 
 
+def _action_open(chat: TelegramChat, args) -> dict:
+    state = chat.open()
+    return {"ok": True, "peer": chat.peer, "title": state.get("title"), "subtitle": state.get("subtitle"),
+            "last_id": chat.last_id()}
+
+
+def _action_read(chat: TelegramChat, args) -> dict:
+    chat.open()
+    messages = chat.messages(after=args.after)
+    if args.limit:
+        messages = messages[-args.limit:]
+    return {"ok": True, "messages": [m.to_json() for m in messages]}
+
+
+def _action_send(chat: TelegramChat, args) -> dict:
+    text = args.text if args.text is not None else Path(args.text_file).read_text(encoding="utf-8").strip()
+    return {"ok": True, "message": chat.send_text(text, reply_to=args.reply_to).to_json()}
+
+
+def _action_send_file(chat: TelegramChat, args) -> dict:
+    return {"ok": True, "message": chat.send_file(args.file, reply_to=args.reply_to).to_json()}
+
+
+def _action_click(chat: TelegramChat, args) -> dict:
+    return {"ok": True, "message_id": args.message, "button": chat.click_button(args.message, args.button)}
+
+
+def _action_wait(chat: TelegramChat, args) -> dict:
+    chat.open()
+    direction = {"peer": "in", "me": "out", "any": "any"}[args.sender]
+    message = chat.wait_for(after=args.after, message_id=args.message, contains=args.contains,
+                            direction=direction, timeout=args.timeout)
+    return {"ok": True, "message": message.to_json()}
+
+
+def _action_screenshot(chat: TelegramChat, args) -> dict:
+    return {"ok": True, "path": chat.screenshot(args.out)}
+
+
+_CHAT_ACTIONS = {
+    "open": _action_open,
+    "read": _action_read,
+    "send": _action_send,
+    "send-file": _action_send_file,
+    "click": _action_click,
+    "wait": _action_wait,
+    "screenshot": _action_screenshot,
+}
+
+
 def run_chat_command(args, driver: ChatDriver, out=None, err=None) -> int:
     """Execute one `qa telegram chat <action>`; print one JSON object on stdout.
 
@@ -647,35 +724,11 @@ def run_chat_command(args, driver: ChatDriver, out=None, err=None) -> int:
     out = out if out is not None else sys.stdout
     err = err if err is not None else sys.stderr
     chat = TelegramChat(driver, args.peer, args.username, allow_non_bot=args.allow_non_bot)
-    action = args.chat_command
+    handler = _CHAT_ACTIONS.get(args.chat_command)
+    if handler is None:
+        return 2
     try:
-        if action == "open":
-            state = chat.open()
-            _emit({"ok": True, "peer": chat.peer, "title": state.get("title"), "subtitle": state.get("subtitle"),
-                   "last_id": chat.last_id()}, out)
-        elif action == "read":
-            chat.open()
-            messages = chat.messages(after=args.after)
-            if args.limit:
-                messages = messages[-args.limit:]
-            _emit({"ok": True, "messages": [m.to_json() for m in messages]}, out)
-        elif action == "send":
-            text = args.text if args.text is not None else Path(args.text_file).read_text(encoding="utf-8").strip()
-            _emit({"ok": True, "message": chat.send_text(text, reply_to=args.reply_to).to_json()}, out)
-        elif action == "send-file":
-            _emit({"ok": True, "message": chat.send_file(args.file, reply_to=args.reply_to).to_json()}, out)
-        elif action == "click":
-            _emit({"ok": True, "message_id": args.message, "button": chat.click_button(args.message, args.button)}, out)
-        elif action == "wait":
-            chat.open()
-            direction = {"peer": "in", "me": "out", "any": "any"}[args.sender]
-            message = chat.wait_for(after=args.after, message_id=args.message, contains=args.contains,
-                                    direction=direction, timeout=args.timeout)
-            _emit({"ok": True, "message": message.to_json()}, out)
-        elif action == "screenshot":
-            _emit({"ok": True, "path": chat.screenshot(args.out)}, out)
-        else:
-            return 2
+        _emit(handler(chat, args), out)
         return 0
     except BrowserMissingError:
         raise

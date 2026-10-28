@@ -76,17 +76,20 @@ class FakePage:
         if "'start'" in js:
             return {"ok": self.start_button}
         if "'button'" in js:
-            label = json.loads(re.search(r"const want = norm\((.*?)\);", js).group(1))
-            target = int(json.loads(re.search(r'data-message-id="\' \+ (".*?") \+', js).group(1)))
-            m = next((m for m in self.messages if m["id"] == target), None)
-            if m is None:
-                return {"ok": False, "reason": "message-not-rendered", "labels": []}
-            hits = [b for b in m["buttons"] if b == label] or [b for b in m["buttons"] if label in b]
-            if len(hits) != 1:
-                return {"ok": False, "reason": "ambiguous" if hits else "no-such-button", "labels": m["buttons"]}
-            self.tagged_button = hits[0]
-            return {"ok": True, "label": hits[0], "labels": m["buttons"]}
+            return self._tag_button(js)
         return {"ok": True, "found": "list", "tagged": False, "active": True}
+
+    def _tag_button(self, js):
+        label = json.loads(re.search(r"const want = norm\((.*?)\);", js).group(1))
+        target = int(json.loads(re.search(r'data-message-id="\' \+ (".*?") \+', js).group(1)))
+        m = next((m for m in self.messages if m["id"] == target), None)
+        if m is None:
+            return {"ok": False, "reason": "message-not-rendered", "labels": []}
+        hits = [b for b in m["buttons"] if b == label] or [b for b in m["buttons"] if label in b]
+        if len(hits) != 1:
+            return {"ok": False, "reason": "ambiguous" if hits else "no-such-button", "labels": m["buttons"]}
+        self.tagged_button = hits[0]
+        return {"ok": True, "label": hits[0], "labels": m["buttons"]}
 
     def batch(self, commands):
         self.batches.append(commands)
@@ -537,3 +540,135 @@ def test_start_is_never_clicked_in_a_non_bot_chat_even_with_allow_non_bot():
     code, payload = run(page, "send", "--peer", str(BOT), "--text", "/start", "--allow-non-bot")
     assert code == 2 and "has not been started" in payload["error"]
     assert not _clicked_start(page)
+
+
+# -- username search recovery -------------------------------------------------
+
+
+class SearchPage(FakePage):
+    """Web A search model: inserttext/fill set the box value; the peer's search
+    result shows only while the value equals `result_for`. `wipe` makes the page
+    clear the box at the first poll sleep after typing (Web A clearing a cold query)."""
+
+    def __init__(self, result_for="somebot", clear_first_typing=False, in_list=False, has_input=True, instant=False):
+        super().__init__([msg(1, "hi")], subtitle="bot")
+        self.result_for = result_for
+        self.value = ""
+        self.clear_first_typing = clear_first_typing
+        self.in_list = in_list
+        self.instant = instant
+        self.has_input = has_input
+        self.opened = False
+        self.metadata_evals = 0
+        self.wipe = False
+        self.settled = True  # search results render one poll after typing
+
+    def eval_json(self, js):
+        if "onWeb" not in js and "telegram-search-input" in js:
+            self.metadata_evals += 1
+            return {"present": self.has_input, "length": len(self.value)}
+        if "found: 'list'" in js:
+            if self.in_list:
+                return {"found": "list"}
+            return {"found": "search" if self.settled and self.value == self.result_for else None}
+        return super().eval_json(js)
+
+    def batch(self, commands):
+        self.batches.append(commands)
+        for c in commands:
+            if c[:2] == ["keyboard", "inserttext"]:
+                self.value = c[2]
+                self.settled = self.instant
+                if self.clear_first_typing:
+                    self.clear_first_typing = False
+                    self.wipe = True
+            elif c[0] == "fill":
+                self.value = c[2]
+                self.settled = self.instant
+            elif c == ["click", '[data-qa-target="peer"]']:
+                self.opened = True
+
+
+def open_search(page):
+    from qa_cli.chat import ChatTimeoutError, TelegramChat
+
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+        if page.wipe:
+            page.wipe = False
+            page.value = ""
+        page.settled = True
+
+    chat = TelegramChat(page, BOT, "somebot", clock=lambda: now[0], sleep=sleep)
+    try:
+        return chat.open(), now[0], None
+    except ChatTimeoutError as error:
+        return None, now[0], error
+
+
+def fill_batches(page):
+    return [b for b in page.batches if any(c[0] == "fill" for c in b)]
+
+
+def test_search_query_cleared_by_the_page_is_re_entered_once():
+    page = SearchPage(clear_first_typing=True)
+    state, _, error = open_search(page)
+    assert error is None and state["open"]
+    assert fill_batches(page) == [[["click", "#telegram-search-input"], ["fill", "#telegram-search-input", "somebot"]]]
+
+
+def test_search_with_a_stable_query_and_no_result_times_out_without_recovery():
+    page = SearchPage(result_for="nobody")
+    _, elapsed, error = open_search(page)
+    assert error is not None and "search result for @somebot" in str(error)
+    assert fill_batches(page) == []
+    assert 15.0 <= elapsed < 15.0 + 1.4
+
+
+def test_search_recovers_at_most_once_and_keeps_the_original_deadline():
+    class Stubborn(SearchPage):
+        def batch(self, commands):
+            super().batch(commands)
+            if any(c[0] in ("fill", "keyboard") for c in commands):
+                self.wipe = True
+
+    page = Stubborn()
+    _, elapsed, error = open_search(page)
+    assert error is not None and "timed out after 10s" in str(error)
+    assert len(fill_batches(page)) == 1
+    assert 15.0 <= elapsed < 15.0 + 1.4
+
+
+def test_peer_found_in_the_chat_list_never_reads_the_search_input():
+    page = SearchPage(in_list=True)
+    state, _, error = open_search(page)
+    assert error is None and state["open"]
+    assert page.metadata_evals == 0 and fill_batches(page) == [] and typed_texts(page) == []
+
+
+def test_peer_found_on_the_first_search_poll_needs_no_input_read():
+    page = SearchPage(instant=True)
+    state, _, error = open_search(page)
+    assert error is None and state["open"]
+    assert page.metadata_evals == 0 and fill_batches(page) == []
+
+
+def test_unexpected_non_empty_search_input_is_left_alone():
+    class Typed(SearchPage):
+        def batch(self, commands):
+            super().batch(commands)
+            if any(c[:2] == ["keyboard", "inserttext"] for c in commands):
+                self.value = "something else"
+
+    page = Typed()
+    _, _, error = open_search(page)
+    assert error is not None and "search result for @somebot" in str(error)
+    assert fill_batches(page) == [] and page.value == "something else"
+
+
+def test_missing_search_input_is_left_alone():
+    page = SearchPage(result_for="nobody", has_input=False)
+    _, _, error = open_search(page)
+    assert error is not None and fill_batches(page) == []
